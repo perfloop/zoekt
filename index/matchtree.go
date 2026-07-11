@@ -207,7 +207,6 @@ type regexpMatchTree struct {
 	bruteForceMatchTree
 
 	hasPrefix bool
-	prefix    string
 	needle    *asciiFoldNeedle
 }
 
@@ -249,7 +248,6 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 			}
 			if isEligible {
 				t.hasPrefix = true
-				t.prefix = litPref
 				t.needle = newAsciiFoldNeedle(litPref)
 			}
 		}

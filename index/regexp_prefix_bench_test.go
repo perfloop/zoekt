@@ -47,7 +47,7 @@ func TestRegexpPrefixHasPrefix(t *testing.T) {
 	}
 
 	mt := newRegexpMatchTree(regexpQuery)
-	t.Logf("hasPrefix: %v, prefix: %q", mt.hasPrefix, mt.prefix)
+	t.Logf("hasPrefix: %v", mt.hasPrefix)
 	if !mt.hasPrefix {
 		t.Fatal("expected mt.hasPrefix to be true")
 	}
@@ -202,6 +202,42 @@ func BenchmarkCaseInsensitiveRegexpPrefixMatch(b *testing.B) {
 		}
 		if len(res.Files) != 1 {
 			b.Fatalf("expected 1 file match, got %d", len(res.Files))
+		}
+	}
+}
+
+func BenchmarkCaseInsensitiveRegexpPrefixLen3(b *testing.B) {
+	ctx := context.Background()
+
+	// Generate a 200KB content document.
+	var sb strings.Builder
+	for i := 0; i < 2000; i++ {
+		sb.WriteString(fmt.Sprintf("line-%d: this is some random text that does not match the pattern. we write code here.\n", i))
+	}
+
+	doc := Document{
+		Name:    "my_large_code_file.go",
+		Content: []byte(sb.String()),
+	}
+
+	searcher := searcherForTest(b, testShardBuilder(b, nil, doc))
+
+	// 'for' has length 3, has no i, I, k, K, s, S, and is case-insensitive
+	q, err := query.Parse("(?i)for.*")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	opts := &zoekt.SearchOptions{}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := searcher.Search(ctx, q, opts)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(res.Files) != 0 {
+			b.Fatalf("expected 0 matches, got %d", len(res.Files))
 		}
 	}
 }
