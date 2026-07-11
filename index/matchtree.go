@@ -242,7 +242,7 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 			isEligible := true
 			for i := 0; i < len(litPref); i++ {
 				c := litPref[i]
-				if c >= 128 || c == 'k' || c == 'K' || c == 's' || c == 'S' {
+				if c >= 128 || c == 'k' || c == 'K' || c == 's' || c == 'S' || c == 'i' || c == 'I' {
 					isEligible = false
 					break
 				}
@@ -1546,18 +1546,83 @@ func (an *asciiFoldNeedle) exists(haystack []byte) bool {
 	if n == 0 || len(haystack) < n {
 		return false
 	}
+	m0 := an.masks[0]
+	t0 := an.targets[0]
 	limit := len(haystack) - n
 
-	for i := 0; i <= limit; i++ {
-		match := true
-		for j := 0; j < n; j++ {
-			if (haystack[i+j] | an.masks[j]) != an.targets[j] {
-				match = false
-				break
+	i := 0
+	if m0 == 0x20 {
+		t0Upper := t0 - 32
+		nextT0 := -1
+		nextT0Upper := -1
+		for i <= limit {
+			if nextT0 < i {
+				idx := bytes.IndexByte(haystack[i:limit+1], t0)
+				if idx >= 0 {
+					nextT0 = i + idx
+				} else {
+					nextT0 = -1
+				}
 			}
+			if nextT0Upper < i {
+				idx := bytes.IndexByte(haystack[i:limit+1], t0Upper)
+				if idx >= 0 {
+					nextT0Upper = i + idx
+				} else {
+					nextT0Upper = -1
+				}
+			}
+
+			next := -1
+			if nextT0 >= 0 && nextT0Upper >= 0 {
+				if nextT0 < nextT0Upper {
+					next = nextT0
+				} else {
+					next = nextT0Upper
+				}
+			} else if nextT0 >= 0 {
+				next = nextT0
+			} else if nextT0Upper >= 0 {
+				next = nextT0Upper
+			}
+
+			if next < 0 {
+				return false
+			}
+
+			i = next
+
+			match := true
+			for j := 1; j < n; j++ {
+				if (haystack[i+j] | an.masks[j]) != an.targets[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+			i++
 		}
-		if match {
-			return true
+	} else {
+		for i <= limit {
+			idx := bytes.IndexByte(haystack[i:limit+1], t0)
+			if idx < 0 {
+				return false
+			}
+			i += idx
+
+			match := true
+			for j := 1; j < n; j++ {
+				if (haystack[i+j] | an.masks[j]) != an.targets[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+			i++
 		}
 	}
 	return false

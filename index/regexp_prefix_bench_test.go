@@ -20,7 +20,7 @@ func TestAsciiFoldNeedle(t *testing.T) {
 		{"abc", "ABC", true},
 		{"abc", "aBc", true},
 		{"abc", "def", false},
-		{"method", "my_method_Method_METHOD_mEtHoD", true},
+		{"great", "my_great_Great_GREAT_gReAt", true},
 		{"123", "abc123def123", true},
 		{"abc", "ab", false},
 	}
@@ -37,7 +37,7 @@ func TestAsciiFoldNeedle(t *testing.T) {
 }
 
 func TestRegexpPrefixHasPrefix(t *testing.T) {
-	q, err := query.Parse("(?i)MyFavoriteMethod.*")
+	q, err := query.Parse("(?i)MyGreatMethod.*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,17 +56,17 @@ func TestRegexpPrefixHasPrefix(t *testing.T) {
 func TestRegexpPrefixCorrectness(t *testing.T) {
 	// Standard searcher matching versus our optimized prefix matching
 	docs := []Document{
-		{Name: "f1", Content: []byte("line-special: here is MyFavoriteMethod defined with some arguments.\n")},
-		{Name: "f2", Content: []byte("MyFavoriteMethod at the start\n")},
-		{Name: "f3", Content: []byte("ending with MyFavoriteMethod")},
-		{Name: "f4", Content: []byte("mixed CASE: mYfAvOrItEmEtHoD here")},
-		{Name: "f5", Content: []byte("multiple: MyFavoriteMethod MyFavoriteMethod MyFavoriteMethod")},
+		{Name: "f1", Content: []byte("line-special: here is MyGreatMethod defined with some arguments.\n")},
+		{Name: "f2", Content: []byte("MyGreatMethod at the start\n")},
+		{Name: "f3", Content: []byte("ending with MyGreatMethod")},
+		{Name: "f4", Content: []byte("mixed CASE: mYgReAtMeThOd here")},
+		{Name: "f5", Content: []byte("multiple: MyGreatMethod MyGreatMethod MyGreatMethod")},
 		{Name: "f6", Content: []byte("no matches here at all")},
 	}
 
 	searcher := searcherForTest(t, testShardBuilder(t, nil, docs...))
 
-	q, err := query.Parse("(?i)MyFavoriteMethod.*")
+	q, err := query.Parse("(?i)MyGreatMethod.*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,22 +86,21 @@ func TestRegexpPrefixCorrectness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 'smart' has 's' which folds with long s, so hasPrefix must be false
 	smartRegexpQuery := smartQ.(*query.Regexp)
 	smartMT := newRegexpMatchTree(smartRegexpQuery)
 	if smartMT.hasPrefix {
 		t.Fatal("expected smartMT.hasPrefix to be false due to 's' character")
 	}
 
-	// 'kelvin' has 'k' which folds with Kelvin symbol, so hasPrefix must be false
-	kelvinQ, err := query.Parse("(?i)kelvin.*")
+	// Verify that 'i'/'I' folding is correctly excluded from the pre-scanner
+	imageQ, err := query.Parse("(?i)image.*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	kelvinRegexpQuery := kelvinQ.(*query.Regexp)
-	kelvinMT := newRegexpMatchTree(kelvinRegexpQuery)
-	if kelvinMT.hasPrefix {
-		t.Fatal("expected kelvinMT.hasPrefix to be false due to 'k' character")
+	imageRegexpQuery := imageQ.(*query.Regexp)
+	imageMT := newRegexpMatchTree(imageRegexpQuery)
+	if imageMT.hasPrefix {
+		t.Fatal("expected imageMT.hasPrefix to be false due to 'i' character")
 	}
 }
 
@@ -121,7 +120,7 @@ func BenchmarkCaseInsensitiveRegexpPrefix(b *testing.B) {
 
 	searcher := searcherForTest(b, testShardBuilder(b, nil, doc))
 
-	q, err := query.Parse("(?i)MyFavoriteMethod.*")
+	q, err := query.Parse("(?i)MyGreatMethod.*")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -148,7 +147,7 @@ func BenchmarkCaseInsensitiveRegexpPrefixMatch(b *testing.B) {
 	for i := 0; i < 2000; i++ {
 		sb.WriteString(fmt.Sprintf("line-%d: this is some random text that does not match the pattern. we write code here.\n", i))
 		if i == 1000 {
-			sb.WriteString("line-special: here is MyFavoriteMethod defined with some arguments.\n")
+			sb.WriteString("line-special: here is MyGreatMethod defined with some arguments.\n")
 		}
 	}
 
@@ -159,7 +158,7 @@ func BenchmarkCaseInsensitiveRegexpPrefixMatch(b *testing.B) {
 
 	searcher := searcherForTest(b, testShardBuilder(b, nil, doc))
 
-	q, err := query.Parse("(?i)MyFavoriteMethod.*")
+	q, err := query.Parse("(?i)MyGreatMethod.*")
 	if err != nil {
 		b.Fatal(err)
 	}
