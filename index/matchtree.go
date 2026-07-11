@@ -205,6 +205,10 @@ type regexpMatchTree struct {
 
 	// nextDoc, prepare.
 	bruteForceMatchTree
+
+	hasPrefix bool
+	prefix    string
+	needle    *asciiFoldNeedle
 }
 
 func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
@@ -221,12 +225,36 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 	if !s.FileName {
 		hr = hybridre2.MustCompile(pattern)
 	}
-	return &regexpMatchTree{
+
+	t := &regexpMatchTree{
 		regexp:       regexp.MustCompile(pattern),
 		hybridRegexp: hr,
 		origRegexp:   s.Regexp,
 		fileName:     s.FileName,
 	}
+
+	if !s.FileName {
+		litPref, isFold := extractLiteralPrefixWithFold(s.Regexp)
+		if !s.CaseSensitive {
+			isFold = true
+		}
+		if isFold && len(litPref) >= 3 {
+			isASCII := true
+			for i := 0; i < len(litPref); i++ {
+				if litPref[i] >= 128 {
+					isASCII = false
+					break
+				}
+			}
+			if isASCII {
+				t.hasPrefix = true
+				t.prefix = litPref
+				t.needle = newAsciiFoldNeedle(litPref)
+			}
+		}
+	}
+
+	return t
 }
 
 // \bLITERAL\b
@@ -818,25 +846,53 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 
 	cp.stats.RegexpsConsidered++
 	data := cp.data(t.fileName)
-	// For file content, use hybridRegexp which dispatches to go-re2 when
-	// len(data) >= ZOEKT_RE2_THRESHOLD_BYTES. For filename matching, use
-	// grafana/regexp directly: filenames are always short, so the WASM
-	// call overhead of go-re2 outweighs any benefit.
-	var idxs [][]int
-	if t.fileName {
-		idxs = t.regexp.FindAllIndex(data, -1)
-	} else {
-		idxs = t.hybridRegexp.FindAllIndex(data, -1)
-	}
-	found := t.found[:0]
-	for _, idx := range idxs {
-		cm := &candidateMatch{
-			byteOffset:  uint32(idx[0]),
-			byteMatchSz: uint32(idx[1] - idx[0]),
-			fileName:    t.fileName,
-		}
 
-		found = append(found, cm)
+	found := t.found[:0]
+	if t.hasPrefix {
+		offsets := t.needle.search(data)
+		lastEnd := 0
+		for _, offset := range offsets {
+			if offset < lastEnd {
+				continue
+			}
+			var idxs [][]int
+			if t.fileName {
+				idxs = t.regexp.FindAllIndex(data[offset:], 1)
+			} else {
+				idxs = t.hybridRegexp.FindAllIndex(data[offset:], 1)
+			}
+			if len(idxs) > 0 && idxs[0][0] == 0 {
+				start := offset
+				end := offset + idxs[0][1]
+				cm := &candidateMatch{
+					byteOffset:  uint32(start),
+					byteMatchSz: uint32(end - start),
+					fileName:    t.fileName,
+				}
+				found = append(found, cm)
+				lastEnd = end
+			}
+		}
+	} else {
+		// For file content, use hybridRegexp which dispatches to go-re2 when
+		// len(data) >= ZOEKT_RE2_THRESHOLD_BYTES. For filename matching, use
+		// grafana/regexp directly: filenames are always short, so the WASM
+		// call overhead of go-re2 outweighs any benefit.
+		var idxs [][]int
+		if t.fileName {
+			idxs = t.regexp.FindAllIndex(data, -1)
+		} else {
+			idxs = t.hybridRegexp.FindAllIndex(data, -1)
+		}
+		for _, idx := range idxs {
+			cm := &candidateMatch{
+				byteOffset:  uint32(idx[0]),
+				byteMatchSz: uint32(idx[1] - idx[0]),
+				fileName:    t.fileName,
+			}
+
+			found = append(found, cm)
+		}
 	}
 	t.found = found
 	t.reEvaluated = true
@@ -1477,4 +1533,108 @@ func queryMetaChecksum(field string, value *regexp.Regexp) string {
 	h.Write([]byte{':'})
 	h.Write([]byte(value.String()))
 	return fmt.Sprintf("%x", h.Sum64())
+}
+
+type asciiFoldNeedle struct {
+	masks   []byte
+	targets []byte
+}
+
+func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
+	masks := make([]byte, len(needle))
+	targets := make([]byte, len(needle))
+	for i := 0; i < len(needle); i++ {
+		c := needle[i]
+		if c >= 'A' && c <= 'Z' {
+			c = c + 32
+		}
+		if c >= 'a' && c <= 'z' {
+			masks[i] = 0x20
+			targets[i] = c
+		} else {
+			masks[i] = 0x00
+			targets[i] = c
+		}
+	}
+	return &asciiFoldNeedle{masks: masks, targets: targets}
+}
+
+func (an *asciiFoldNeedle) search(haystack []byte) []int {
+	n := len(an.targets)
+	if n == 0 || len(haystack) < n {
+		return nil
+	}
+	var offsets []int
+	limit := len(haystack) - n
+
+	m0 := an.masks[0]
+	t0 := an.targets[0]
+
+	if m0 == 0x20 {
+		t0Upper := t0 - 32
+		for i := 0; i <= limit; i++ {
+			b := haystack[i]
+			if b == t0 || b == t0Upper {
+				match := true
+				for j := 1; j < n; j++ {
+					if (haystack[i+j] | an.masks[j]) != an.targets[j] {
+						match = false
+						break
+					}
+				}
+				if match {
+					offsets = append(offsets, i)
+				}
+			}
+		}
+	} else {
+		for i := 0; i <= limit; i++ {
+			b := haystack[i]
+			if b == t0 {
+				match := true
+				for j := 1; j < n; j++ {
+					if (haystack[i+j] | an.masks[j]) != an.targets[j] {
+						match = false
+						break
+					}
+				}
+				if match {
+					offsets = append(offsets, i)
+				}
+			}
+		}
+	}
+	return offsets
+}
+
+func extractLiteralPrefixWithFold(re *syntax.Regexp) (prefix string, isFold bool) {
+	if re == nil {
+		return "", false
+	}
+	switch re.Op {
+	case syntax.OpLiteral:
+		fold := re.Flags&syntax.FoldCase != 0
+		return string(re.Rune), fold
+	case syntax.OpCapture:
+		if len(re.Sub) > 0 {
+			return extractLiteralPrefixWithFold(re.Sub[0])
+		}
+	case syntax.OpConcat:
+		var sb strings.Builder
+		anyFold := false
+		for i, sub := range re.Sub {
+			p, fold := extractLiteralPrefixWithFold(sub)
+			if p == "" {
+				break
+			}
+			if i == 0 {
+				anyFold = fold
+			} else if fold != anyFold {
+				break
+			}
+			sb.WriteString(p)
+		}
+		return sb.String(), anyFold
+	}
+	return "", false
 }

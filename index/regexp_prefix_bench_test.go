@@ -10,6 +10,23 @@ import (
 	"github.com/sourcegraph/zoekt/query"
 )
 
+func TestRegexpPrefixHasPrefix(t *testing.T) {
+	q, err := query.Parse("(?i)MyAwesomeFunction.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpQuery, ok := q.(*query.Regexp)
+	if !ok {
+		t.Fatalf("expected query.Regexp, got %T", q)
+	}
+
+	mt := newRegexpMatchTree(regexpQuery)
+	t.Logf("hasPrefix: %v, prefix: %q", mt.hasPrefix, mt.prefix)
+	if !mt.hasPrefix {
+		t.Fatal("expected mt.hasPrefix to be true")
+	}
+}
+
 func BenchmarkCaseInsensitiveRegexpPrefix(b *testing.B) {
 	ctx := context.Background()
 
