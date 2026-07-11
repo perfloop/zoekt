@@ -858,7 +858,7 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 
 	found := t.found[:0]
 	if t.hasPrefix {
-		offsets := t.needle.search(data)
+		offsets := t.needle.search(data, 250)
 		if len(offsets) > 250 {
 			goto fallback
 		}
@@ -1578,7 +1578,7 @@ func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
 	return &asciiFoldNeedle{masks: masks, targets: targets}
 }
 
-func (an *asciiFoldNeedle) search(haystack []byte) []int {
+func (an *asciiFoldNeedle) search(haystack []byte, maxOffsets int) []int {
 	n := len(an.targets)
 	if n == 0 || len(haystack) < n {
 		return nil
@@ -1603,6 +1603,9 @@ func (an *asciiFoldNeedle) search(haystack []byte) []int {
 				}
 				if match {
 					offsets = append(offsets, i)
+					if len(offsets) > maxOffsets {
+						return offsets
+					}
 				}
 			}
 		}
@@ -1619,6 +1622,9 @@ func (an *asciiFoldNeedle) search(haystack []byte) []int {
 				}
 				if match {
 					offsets = append(offsets, i)
+					if len(offsets) > maxOffsets {
+						return offsets
+					}
 				}
 			}
 		}
