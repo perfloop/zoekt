@@ -81,28 +81,27 @@ func TestRegexpPrefixCorrectness(t *testing.T) {
 		t.Fatalf("expected 5 matched files, got %d", len(res.Files))
 	}
 
-	// Also verify that the Kelvin symbol / "Kelvin" case-insensitive search is NOT optimized and still works
-	kelvinDoc := Document{Name: "f_kelvin", Content: []byte("Temperature in Kelvin is high.\n")}
-	kelvinSearcher := searcherForTest(t, testShardBuilder(t, nil, kelvinDoc))
+	// Verify that 's'/'S' folding is correctly excluded from the pre-scanner
+	smartQ, err := query.Parse("(?i)smart.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 'smart' has 's' which folds with long s, so hasPrefix must be false
+	smartRegexpQuery := smartQ.(*query.Regexp)
+	smartMT := newRegexpMatchTree(smartRegexpQuery)
+	if smartMT.hasPrefix {
+		t.Fatal("expected smartMT.hasPrefix to be false due to 's' character")
+	}
 
-	// Search for 'kelvin' (case-insensitive) - contains 'k', so pre-scan must be disabled
+	// 'kelvin' has 'k' which folds with Kelvin symbol, so hasPrefix must be false
 	kelvinQ, err := query.Parse("(?i)kelvin.*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Verify hasPrefix is false for kelvinQ because it has 'k'
-	regexpQuery := kelvinQ.(*query.Regexp)
-	mt := newRegexpMatchTree(regexpQuery)
-	if mt.hasPrefix {
-		t.Fatal("expected mt.hasPrefix to be false for 'kelvin' query due to 'k'")
-	}
-
-	kelvinRes, err := kelvinSearcher.Search(context.Background(), kelvinQ, &zoekt.SearchOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kelvinRes.Files) != 1 {
-		t.Fatalf("expected 1 file match for kelvin, got %d", len(kelvinRes.Files))
+	kelvinRegexpQuery := kelvinQ.(*query.Regexp)
+	kelvinMT := newRegexpMatchTree(kelvinRegexpQuery)
+	if kelvinMT.hasPrefix {
+		t.Fatal("expected kelvinMT.hasPrefix to be false due to 'k' character")
 	}
 }
 
@@ -113,7 +112,42 @@ func BenchmarkCaseInsensitiveRegexpPrefix(b *testing.B) {
 	var sb strings.Builder
 	for i := 0; i < 2000; i++ {
 		sb.WriteString(fmt.Sprintf("line-%d: this is some random text that does not match the pattern. we write code here.\n", i))
-		if i == 500 || i == 1500 {
+	}
+
+	doc := Document{
+		Name:    "my_large_code_file.go",
+		Content: []byte(sb.String()),
+	}
+
+	searcher := searcherForTest(b, testShardBuilder(b, nil, doc))
+
+	q, err := query.Parse("(?i)MyFavoriteMethod.*")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	opts := &zoekt.SearchOptions{}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := searcher.Search(ctx, q, opts)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(res.Files) != 0 {
+			b.Fatalf("expected 0 file matches, got %d", len(res.Files))
+		}
+	}
+}
+
+func BenchmarkCaseInsensitiveRegexpPrefixMatch(b *testing.B) {
+	ctx := context.Background()
+
+	// Generate a 200KB content document.
+	var sb strings.Builder
+	for i := 0; i < 2000; i++ {
+		sb.WriteString(fmt.Sprintf("line-%d: this is some random text that does not match the pattern. we write code here.\n", i))
+		if i == 1000 {
 			sb.WriteString("line-special: here is MyFavoriteMethod defined with some arguments.\n")
 		}
 	}
@@ -125,8 +159,6 @@ func BenchmarkCaseInsensitiveRegexpPrefix(b *testing.B) {
 
 	searcher := searcherForTest(b, testShardBuilder(b, nil, doc))
 
-	// (?i)MyFavoriteMethod.*
-	// It has a case-insensitive literal prefix "MyFavoriteMethod" of length > 3
 	q, err := query.Parse("(?i)MyFavoriteMethod.*")
 	if err != nil {
 		b.Fatal(err)

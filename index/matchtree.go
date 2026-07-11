@@ -1546,70 +1546,18 @@ func (an *asciiFoldNeedle) exists(haystack []byte) bool {
 	if n == 0 || len(haystack) < n {
 		return false
 	}
-	m0 := an.masks[0]
-	t0 := an.targets[0]
-
-	i := 0
 	limit := len(haystack) - n
 
-	if m0 == 0x20 {
-		t0Upper := t0 - 32
-		for i <= limit {
-			idx1 := bytes.IndexByte(haystack[i:limit+1], t0)
-			idx2 := bytes.IndexByte(haystack[i:limit+1], t0Upper)
-
-			next := -1
-			if idx1 >= 0 && idx2 >= 0 {
-				if idx1 < idx2 {
-					next = idx1
-				} else {
-					next = idx2
-				}
-			} else if idx1 >= 0 {
-				next = idx1
-			} else if idx2 >= 0 {
-				next = idx2
+	for i := 0; i <= limit; i++ {
+		match := true
+		for j := 0; j < n; j++ {
+			if (haystack[i+j] | an.masks[j]) != an.targets[j] {
+				match = false
+				break
 			}
-
-			if next < 0 {
-				return false
-			}
-
-			i += next
-
-			// Check if the rest matches
-			match := true
-			for j := 1; j < n; j++ {
-				if (haystack[i+j] | an.masks[j]) != an.targets[j] {
-					match = false
-					break
-				}
-			}
-			if match {
-				return true
-			}
-			i++
 		}
-	} else {
-		for i <= limit {
-			idx := bytes.IndexByte(haystack[i:limit+1], t0)
-			if idx < 0 {
-				return false
-			}
-			i += idx
-
-			// Check if the rest matches
-			match := true
-			for j := 1; j < n; j++ {
-				if (haystack[i+j] | an.masks[j]) != an.targets[j] {
-					match = false
-					break
-				}
-			}
-			if match {
-				return true
-			}
-			i++
+		if match {
+			return true
 		}
 	}
 	return false
