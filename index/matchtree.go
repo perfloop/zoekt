@@ -206,9 +206,11 @@ type regexpMatchTree struct {
 	// nextDoc, prepare.
 	bruteForceMatchTree
 
-	hasPrefix bool
-	prefix    string
-	needle    *asciiFoldNeedle
+	hasPrefix            bool
+	prefix               string
+	needle               *asciiFoldNeedle
+	anchoredRegexp       *regexp.Regexp
+	anchoredHybridRegexp *hybridre2.Regexp
 }
 
 func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
@@ -239,17 +241,24 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 			isFold = true
 		}
 		if isFold && len(litPref) >= 3 {
-			isASCII := true
+			isEligible := true
 			for i := 0; i < len(litPref); i++ {
-				if litPref[i] >= 128 {
-					isASCII = false
+				c := litPref[i]
+				if c >= 128 || c == 'k' || c == 'K' || c == 's' || c == 'S' {
+					isEligible = false
 					break
 				}
 			}
-			if isASCII {
+			if isEligible {
 				t.hasPrefix = true
 				t.prefix = litPref
 				t.needle = newAsciiFoldNeedle(litPref)
+
+				anchoredPattern := "^(?:" + pattern + ")"
+				t.anchoredRegexp = regexp.MustCompile(anchoredPattern)
+				if hr != nil {
+					t.anchoredHybridRegexp = hybridre2.MustCompile(anchoredPattern)
+				}
 			}
 		}
 	}
@@ -850,6 +859,10 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 	found := t.found[:0]
 	if t.hasPrefix {
 		offsets := t.needle.search(data)
+		if len(offsets) > 250 {
+			goto fallback
+		}
+
 		lastEnd := 0
 		for _, offset := range offsets {
 			if offset < lastEnd {
@@ -857,9 +870,11 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 			}
 			var idxs [][]int
 			if t.fileName {
-				idxs = t.regexp.FindAllIndex(data[offset:], 1)
+				idxs = t.anchoredRegexp.FindAllIndex(data[offset:], 1)
+			} else if t.anchoredHybridRegexp != nil {
+				idxs = t.anchoredHybridRegexp.FindAllIndex(data[offset:], 1)
 			} else {
-				idxs = t.hybridRegexp.FindAllIndex(data[offset:], 1)
+				idxs = t.regexp.FindAllIndex(data[offset:], 1)
 			}
 			if len(idxs) > 0 && idxs[0][0] == 0 {
 				start := offset
@@ -873,26 +888,30 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 				lastEnd = end
 			}
 		}
-	} else {
-		// For file content, use hybridRegexp which dispatches to go-re2 when
-		// len(data) >= ZOEKT_RE2_THRESHOLD_BYTES. For filename matching, use
-		// grafana/regexp directly: filenames are always short, so the WASM
-		// call overhead of go-re2 outweighs any benefit.
-		var idxs [][]int
-		if t.fileName {
-			idxs = t.regexp.FindAllIndex(data, -1)
-		} else {
-			idxs = t.hybridRegexp.FindAllIndex(data, -1)
-		}
-		for _, idx := range idxs {
-			cm := &candidateMatch{
-				byteOffset:  uint32(idx[0]),
-				byteMatchSz: uint32(idx[1] - idx[0]),
-				fileName:    t.fileName,
-			}
+		t.found = found
+		t.reEvaluated = true
+		return matchesStateForSlice(t.found)
+	}
 
-			found = append(found, cm)
+fallback:
+	// For file content, use hybridRegexp which dispatches to go-re2 when
+	// len(data) >= ZOEKT_RE2_THRESHOLD_BYTES. For filename matching, use
+	// grafana/regexp directly: filenames are always short, so the WASM
+	// call overhead of go-re2 outweighs any benefit.
+	var idxs [][]int
+	if t.fileName {
+		idxs = t.regexp.FindAllIndex(data, -1)
+	} else {
+		idxs = t.hybridRegexp.FindAllIndex(data, -1)
+	}
+	for _, idx := range idxs {
+		cm := &candidateMatch{
+			byteOffset:  uint32(idx[0]),
+			byteMatchSz: uint32(idx[1] - idx[0]),
+			fileName:    t.fileName,
 		}
+
+		found = append(found, cm)
 	}
 	t.found = found
 	t.reEvaluated = true

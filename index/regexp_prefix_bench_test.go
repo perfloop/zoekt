@@ -11,7 +11,7 @@ import (
 )
 
 func TestRegexpPrefixHasPrefix(t *testing.T) {
-	q, err := query.Parse("(?i)MyAwesomeFunction.*")
+	q, err := query.Parse("(?i)MyFavoriteMethod.*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func BenchmarkCaseInsensitiveRegexpPrefix(b *testing.B) {
 	for i := 0; i < 2000; i++ {
 		sb.WriteString(fmt.Sprintf("line-%d: this is some random text that does not match the pattern. we write code here.\n", i))
 		if i == 500 || i == 1500 {
-			sb.WriteString("line-special: here is MyAwesomeFunction defined with some arguments.\n")
+			sb.WriteString("line-special: here is MyFavoriteMethod defined with some arguments.\n")
 		}
 	}
 
@@ -46,9 +46,9 @@ func BenchmarkCaseInsensitiveRegexpPrefix(b *testing.B) {
 
 	searcher := searcherForTest(b, testShardBuilder(b, nil, doc))
 
-	// (?i)MyAwesomeFunction.*
-	// It has a case-insensitive literal prefix "MyAwesomeFunction" of length > 3
-	q, err := query.Parse("(?i)MyAwesomeFunction.*")
+	// (?i)MyFavoriteMethod.*
+	// It has a case-insensitive literal prefix "MyFavoriteMethod" of length > 3
+	q, err := query.Parse("(?i)MyFavoriteMethod.*")
 	if err != nil {
 		b.Fatal(err)
 	}
