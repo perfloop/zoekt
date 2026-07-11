@@ -1639,21 +1639,9 @@ func extractLiteralPrefixWithFold(re *syntax.Regexp) (prefix string, isFold bool
 			return extractLiteralPrefixWithFold(re.Sub[0])
 		}
 	case syntax.OpConcat:
-		var sb strings.Builder
-		anyFold := false
-		for i, sub := range re.Sub {
-			p, fold := extractLiteralPrefixWithFold(sub)
-			if p == "" {
-				break
-			}
-			if i == 0 {
-				anyFold = fold
-			} else if fold != anyFold {
-				break
-			}
-			sb.WriteString(p)
+		if len(re.Sub) > 0 {
+			return extractLiteralPrefixWithFold(re.Sub[0])
 		}
-		return sb.String(), anyFold
 	}
 	return "", false
 }

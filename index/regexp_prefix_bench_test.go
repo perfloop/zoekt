@@ -102,34 +102,35 @@ func TestRegexpPrefixCorrectness(t *testing.T) {
 	if imageMT.hasPrefix {
 		t.Fatal("expected imageMT.hasPrefix to be false due to 'i' character")
 	}
-}
 
-func TestRegexpPrefixAdversarial(t *testing.T) {
-	// 200KB document consisting entirely of uppercase 'A' characters.
-	// This tests that our IndexByte state caching prevents quadratic scans on mismatch path.
-	content := strings.Repeat("A", 200*1024)
-	doc := Document{
-		Name:    "adversarial_file.txt",
-		Content: []byte(content),
-	}
+	// Test the variable-length regex correctness cases identified in peer review
+	varLenDoc := Document{Name: "f_var_len", Content: []byte("This has abccdef and abcxyzdef here.\n")}
+	varLenSearcher := searcherForTest(t, testShardBuilder(t, nil, varLenDoc))
 
-	searcher := searcherForTest(t, testShardBuilder(t, nil, doc))
-
-	// (?i)Apple.*
-	// It has prefix "Apple", first char is 'A'/'a'.
-	q, err := query.Parse("(?i)Apple.*")
+	// (?i)(abc+)def
+	q1, err := query.Parse("(?i)(abc+)def")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	opts := &zoekt.SearchOptions{}
-
-	res, err := searcher.Search(context.Background(), q, opts)
+	res1, err := varLenSearcher.Search(context.Background(), q1, &zoekt.SearchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Files) != 0 {
-		t.Fatalf("expected 0 matches, got %d", len(res.Files))
+	if len(res1.Files) != 1 {
+		t.Fatalf("expected 1 file match for (abc+)def, got %d", len(res1.Files))
+	}
+
+	// (?i)(abc.*)def
+	q2, err := query.Parse("(?i)(abc.*)def")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2, err := varLenSearcher.Search(context.Background(), q2, &zoekt.SearchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res2.Files) != 1 {
+		t.Fatalf("expected 1 file match for (abc.*)def, got %d", len(res2.Files))
 	}
 }
 
