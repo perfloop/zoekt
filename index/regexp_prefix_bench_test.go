@@ -104,6 +104,35 @@ func TestRegexpPrefixCorrectness(t *testing.T) {
 	}
 }
 
+func TestRegexpPrefixAdversarial(t *testing.T) {
+	// 200KB document consisting entirely of uppercase 'A' characters.
+	// This tests that our IndexByte state caching prevents quadratic scans on mismatch path.
+	content := strings.Repeat("A", 200*1024)
+	doc := Document{
+		Name:    "adversarial_file.txt",
+		Content: []byte(content),
+	}
+
+	searcher := searcherForTest(t, testShardBuilder(t, nil, doc))
+
+	// (?i)Apple.*
+	// It has prefix "Apple", first char is 'A'/'a'.
+	q, err := query.Parse("(?i)Apple.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := &zoekt.SearchOptions{}
+
+	res, err := searcher.Search(context.Background(), q, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Files) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(res.Files))
+	}
+}
+
 func BenchmarkCaseInsensitiveRegexpPrefix(b *testing.B) {
 	ctx := context.Background()
 

@@ -1561,7 +1561,7 @@ func (an *asciiFoldNeedle) exists(haystack []byte) bool {
 				if idx >= 0 {
 					nextT0 = i + idx
 				} else {
-					nextT0 = -1
+					nextT0 = limit + 1
 				}
 			}
 			if nextT0Upper < i {
@@ -1569,20 +1569,20 @@ func (an *asciiFoldNeedle) exists(haystack []byte) bool {
 				if idx >= 0 {
 					nextT0Upper = i + idx
 				} else {
-					nextT0Upper = -1
+					nextT0Upper = limit + 1
 				}
 			}
 
 			next := -1
-			if nextT0 >= 0 && nextT0Upper >= 0 {
+			if nextT0 <= limit && nextT0Upper <= limit {
 				if nextT0 < nextT0Upper {
 					next = nextT0
 				} else {
 					next = nextT0Upper
 				}
-			} else if nextT0 >= 0 {
+			} else if nextT0 <= limit {
 				next = nextT0
-			} else if nextT0Upper >= 0 {
+			} else if nextT0Upper <= limit {
 				next = nextT0Upper
 			}
 
