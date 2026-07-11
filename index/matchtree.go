@@ -206,11 +206,9 @@ type regexpMatchTree struct {
 	// nextDoc, prepare.
 	bruteForceMatchTree
 
-	hasPrefix            bool
-	prefix               string
-	needle               *asciiFoldNeedle
-	anchoredRegexp       *regexp.Regexp
-	anchoredHybridRegexp *hybridre2.Regexp
+	hasPrefix bool
+	prefix    string
+	needle    *asciiFoldNeedle
 }
 
 func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
@@ -253,12 +251,6 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 				t.hasPrefix = true
 				t.prefix = litPref
 				t.needle = newAsciiFoldNeedle(litPref)
-
-				anchoredPattern := "^(?:" + pattern + ")"
-				t.anchoredRegexp = regexp.MustCompile(anchoredPattern)
-				if hr != nil {
-					t.anchoredHybridRegexp = hybridre2.MustCompile(anchoredPattern)
-				}
 			}
 		}
 	}
@@ -858,42 +850,13 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 
 	found := t.found[:0]
 	if t.hasPrefix {
-		offsets := t.needle.search(data, 250)
-		if len(offsets) > 250 {
-			goto fallback
+		if !t.needle.exists(data) {
+			t.found = found
+			t.reEvaluated = true
+			return matchesNone
 		}
-
-		lastEnd := 0
-		for _, offset := range offsets {
-			if offset < lastEnd {
-				continue
-			}
-			var idxs [][]int
-			if t.fileName {
-				idxs = t.anchoredRegexp.FindAllIndex(data[offset:], 1)
-			} else if t.anchoredHybridRegexp != nil {
-				idxs = t.anchoredHybridRegexp.FindAllIndex(data[offset:], 1)
-			} else {
-				idxs = t.regexp.FindAllIndex(data[offset:], 1)
-			}
-			if len(idxs) > 0 && idxs[0][0] == 0 {
-				start := offset
-				end := offset + idxs[0][1]
-				cm := &candidateMatch{
-					byteOffset:  uint32(start),
-					byteMatchSz: uint32(end - start),
-					fileName:    t.fileName,
-				}
-				found = append(found, cm)
-				lastEnd = end
-			}
-		}
-		t.found = found
-		t.reEvaluated = true
-		return matchesStateForSlice(t.found)
 	}
 
-fallback:
 	// For file content, use hybridRegexp which dispatches to go-re2 when
 	// len(data) >= ZOEKT_RE2_THRESHOLD_BYTES. For filename matching, use
 	// grafana/regexp directly: filenames are always short, so the WASM
@@ -1578,58 +1541,78 @@ func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
 	return &asciiFoldNeedle{masks: masks, targets: targets}
 }
 
-func (an *asciiFoldNeedle) search(haystack []byte, maxOffsets int) []int {
+func (an *asciiFoldNeedle) exists(haystack []byte) bool {
 	n := len(an.targets)
 	if n == 0 || len(haystack) < n {
-		return nil
+		return false
 	}
-	var offsets []int
-	limit := len(haystack) - n
-
 	m0 := an.masks[0]
 	t0 := an.targets[0]
 
+	i := 0
+	limit := len(haystack) - n
+
 	if m0 == 0x20 {
 		t0Upper := t0 - 32
-		for i := 0; i <= limit; i++ {
-			b := haystack[i]
-			if b == t0 || b == t0Upper {
-				match := true
-				for j := 1; j < n; j++ {
-					if (haystack[i+j] | an.masks[j]) != an.targets[j] {
-						match = false
-						break
-					}
+		for i <= limit {
+			idx1 := bytes.IndexByte(haystack[i:limit+1], t0)
+			idx2 := bytes.IndexByte(haystack[i:limit+1], t0Upper)
+
+			next := -1
+			if idx1 >= 0 && idx2 >= 0 {
+				if idx1 < idx2 {
+					next = idx1
+				} else {
+					next = idx2
 				}
-				if match {
-					offsets = append(offsets, i)
-					if len(offsets) > maxOffsets {
-						return offsets
-					}
+			} else if idx1 >= 0 {
+				next = idx1
+			} else if idx2 >= 0 {
+				next = idx2
+			}
+
+			if next < 0 {
+				return false
+			}
+
+			i += next
+
+			// Check if the rest matches
+			match := true
+			for j := 1; j < n; j++ {
+				if (haystack[i+j] | an.masks[j]) != an.targets[j] {
+					match = false
+					break
 				}
 			}
+			if match {
+				return true
+			}
+			i++
 		}
 	} else {
-		for i := 0; i <= limit; i++ {
-			b := haystack[i]
-			if b == t0 {
-				match := true
-				for j := 1; j < n; j++ {
-					if (haystack[i+j] | an.masks[j]) != an.targets[j] {
-						match = false
-						break
-					}
-				}
-				if match {
-					offsets = append(offsets, i)
-					if len(offsets) > maxOffsets {
-						return offsets
-					}
+		for i <= limit {
+			idx := bytes.IndexByte(haystack[i:limit+1], t0)
+			if idx < 0 {
+				return false
+			}
+			i += idx
+
+			// Check if the rest matches
+			match := true
+			for j := 1; j < n; j++ {
+				if (haystack[i+j] | an.masks[j]) != an.targets[j] {
+					match = false
+					break
 				}
 			}
+			if match {
+				return true
+			}
+			i++
 		}
 	}
-	return offsets
+	return false
 }
 
 func extractLiteralPrefixWithFold(re *syntax.Regexp) (prefix string, isFold bool) {

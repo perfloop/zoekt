@@ -14,39 +14,42 @@ func TestAsciiFoldNeedle(t *testing.T) {
 	cases := []struct {
 		needle   string
 		haystack string
-		want     []int
+		want     bool
 	}{
-		{"abc", "abc", []int{0}},
-		{"abc", "ABC", []int{0}},
-		{"abc", "aBc", []int{0}},
-		{"abc", "def", nil},
-		{"method", "my_method_Method_METHOD_mEtHoD", []int{3, 10, 17, 24}},
-		{"123", "abc123def123", []int{3, 9}},
-		{"abc", "ab", nil},
+		{"abc", "abc", true},
+		{"abc", "ABC", true},
+		{"abc", "aBc", true},
+		{"abc", "def", false},
+		{"method", "my_method_Method_METHOD_mEtHoD", true},
+		{"123", "abc123def123", true},
+		{"abc", "ab", false},
 	}
 
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%s in %s", c.needle, c.haystack), func(t *testing.T) {
 			an := newAsciiFoldNeedle(c.needle)
-			got := an.search([]byte(c.haystack), 100)
-			if len(got) != len(c.want) {
+			got := an.exists([]byte(c.haystack))
+			if got != c.want {
 				t.Fatalf("got %v, want %v", got, c.want)
-			}
-			for i := range got {
-				if got[i] != c.want[i] {
-					t.Fatalf("got %v, want %v", got, c.want)
-				}
 			}
 		})
 	}
 }
 
-func TestAsciiFoldNeedleLimit(t *testing.T) {
-	an := newAsciiFoldNeedle("abc")
-	haystack := strings.Repeat("abc", 500)
-	got := an.search([]byte(haystack), 250)
-	if len(got) != 251 {
-		t.Fatalf("expected search to stop at 251 matches, got %d", len(got))
+func TestRegexpPrefixHasPrefix(t *testing.T) {
+	q, err := query.Parse("(?i)MyFavoriteMethod.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpQuery, ok := q.(*query.Regexp)
+	if !ok {
+		t.Fatalf("expected query.Regexp, got %T", q)
+	}
+
+	mt := newRegexpMatchTree(regexpQuery)
+	t.Logf("hasPrefix: %v, prefix: %q", mt.hasPrefix, mt.prefix)
+	if !mt.hasPrefix {
+		t.Fatal("expected mt.hasPrefix to be true")
 	}
 }
 
@@ -58,6 +61,7 @@ func TestRegexpPrefixCorrectness(t *testing.T) {
 		{Name: "f3", Content: []byte("ending with MyFavoriteMethod")},
 		{Name: "f4", Content: []byte("mixed CASE: mYfAvOrItEmEtHoD here")},
 		{Name: "f5", Content: []byte("multiple: MyFavoriteMethod MyFavoriteMethod MyFavoriteMethod")},
+		{Name: "f6", Content: []byte("no matches here at all")},
 	}
 
 	searcher := searcherForTest(t, testShardBuilder(t, nil, docs...))
@@ -72,7 +76,7 @@ func TestRegexpPrefixCorrectness(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify that we matched all 5 documents correctly and matches are identical
+	// Verify that we matched only the 5 documents correctly and matches are identical
 	if len(res.Files) != 5 {
 		t.Fatalf("expected 5 matched files, got %d", len(res.Files))
 	}
