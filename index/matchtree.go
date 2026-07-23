@@ -231,7 +231,9 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 		fileName:     s.FileName,
 	}
 
-	if !s.FileName {
+	// Short patterns cannot contain the five-byte literal required by the
+	// direct path. Avoid inspecting their syntax tree on the ordinary path.
+	if !s.FileName && len(pattern) > len("(?i:abcd)(?-s:.)*") {
 		litPref, isFold := extractFoldLiteralLinePrefix(s.Regexp)
 		// CaseSensitive may be overridden by a scoped regexp flag. Only use
 		// the byte matcher when the literal node itself is case-folded.
@@ -1548,20 +1550,17 @@ type asciiFoldNeedle struct {
 
 	hasKelvinFold bool
 	hasLongSFold  bool
-	hasIFold      bool
 }
 
 var (
 	kelvinSign = []byte("K")
 	longS      = []byte("ſ")
-	dottedI    = []byte("İ")
-	dotlessI   = []byte("ı")
 )
 
 func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
 	masks := make([]byte, len(needle))
 	targets := make([]byte, len(needle))
-	var hasKelvinFold, hasLongSFold, hasIFold bool
+	var hasKelvinFold, hasLongSFold bool
 	for i := 0; i < len(needle); i++ {
 		c := needle[i]
 		if c >= 'A' && c <= 'Z' {
@@ -1580,8 +1579,6 @@ func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
 			hasKelvinFold = true
 		case 's':
 			hasLongSFold = true
-		case 'i':
-			hasIFold = true
 		}
 	}
 	return &asciiFoldNeedle{
@@ -1589,7 +1586,6 @@ func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
 		targets:       targets,
 		hasKelvinFold: hasKelvinFold,
 		hasLongSFold:  hasLongSFold,
-		hasIFold:      hasIFold,
 	}
 }
 
@@ -1597,8 +1593,7 @@ func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
 // recognize, so callers can use the regular expression engine instead.
 func (an *asciiFoldNeedle) hasUnicodeFold(haystack []byte) bool {
 	return (an.hasKelvinFold && bytes.Contains(haystack, kelvinSign)) ||
-		(an.hasLongSFold && bytes.Contains(haystack, longS)) ||
-		(an.hasIFold && (bytes.Contains(haystack, dottedI) || bytes.Contains(haystack, dotlessI)))
+		(an.hasLongSFold && bytes.Contains(haystack, longS))
 }
 
 func (an *asciiFoldNeedle) matchesAt(haystack []byte, offset int) (bool, int) {
