@@ -193,9 +193,10 @@ type regexpMatchTree struct {
 	// For small inputs and filename matches, regexp is used directly.
 	hybridRegexp *hybridre2.Regexp
 
-	// origRegexp is the original parsed regexp from the query structure. It
-	// does not include mutations such as case sensitivity.
-	origRegexp *syntax.Regexp
+	// regexpAll records whether the original parsed regexp matches all lines.
+	// Keeping the derived value avoids retaining the parsed syntax tree solely
+	// for the Symbol query path.
+	regexpAll bool
 
 	fileName bool
 
@@ -227,7 +228,7 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 	t := &regexpMatchTree{
 		regexp:       regexp.MustCompile(compiledPattern),
 		hybridRegexp: hr,
-		origRegexp:   s.Regexp,
+		regexpAll:    isRegexpAll(s.Regexp),
 		fileName:     s.FileName,
 	}
 
@@ -1253,7 +1254,7 @@ func (d *indexData) newMatchTree(q query.Q, opt matchTreeOpt) (matchTree, error)
 
 		return &symbolRegexpMatchTree{
 			regexp:    regexpMT.regexp,
-			all:       isRegexpAll(regexpMT.origRegexp),
+			all:       regexpMT.regexpAll,
 			matchTree: subMT,
 		}, nil
 
