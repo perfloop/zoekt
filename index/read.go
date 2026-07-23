@@ -385,7 +385,6 @@ func (r *reader) readIndexData(toc *indexTOC) (*indexData, error) {
 
 	d.runeOffsets = makeRuneOffsetMap(runeOffsets)
 	d.fileNameRuneOffsets = makeRuneOffsetMap(fileNameRuneOffsets)
-	d.validatePlainASCII()
 
 	d.subRepoPaths = make([][]string, 0, len(d.repoMetaData))
 	for i := range d.repoMetaData {
@@ -497,33 +496,6 @@ func (d *indexData) newBtreeIndex(ngramSec simpleSection, postings compoundSecti
 	bi.postingIndex = postings.index
 
 	return bi, nil
-}
-
-// validatePlainASCII applies a cheap consistency check to the metadata hint
-// using the stored boundaries. The byte-only matcher separately checks raw
-// document content before it relies on this hint.
-func (d *indexData) validatePlainASCII() {
-	if !d.metaData.PlainASCII {
-		return
-	}
-	if !plainASCIIBoundaries(d.boundaries, d.fileEndRunes) {
-		d.metaData.PlainASCII = false
-	}
-}
-
-func plainASCIIBoundaries(byteBoundaries, runeBoundaries []uint32) bool {
-	if len(byteBoundaries) != len(runeBoundaries)+1 {
-		return false
-	}
-
-	var previousRunes uint32
-	for i, endRunes := range runeBoundaries {
-		if byteBoundaries[i+1]-byteBoundaries[i] != endRunes-previousRunes {
-			return false
-		}
-		previousRunes = endRunes
-	}
-	return true
 }
 
 func (d *indexData) verify() error {
