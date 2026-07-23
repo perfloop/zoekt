@@ -215,17 +215,17 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 		prefix = "(?i)"
 	}
 
-	pattern := prefix + syntaxutil.RegexpString(s.Regexp)
+	compiledPattern := prefix + syntaxutil.RegexpString(s.Regexp)
 
 	// hybridRegexp is only used for file content matching; skip the RE2
 	// compilation overhead for filename-only regexps.
 	var hr *hybridre2.Regexp
 	if !s.FileName {
-		hr = hybridre2.MustCompile(pattern)
+		hr = hybridre2.MustCompile(compiledPattern)
 	}
 
 	t := &regexpMatchTree{
-		regexp:       regexp.MustCompile(pattern),
+		regexp:       regexp.MustCompile(compiledPattern),
 		hybridRegexp: hr,
 		origRegexp:   s.Regexp,
 		fileName:     s.FileName,
@@ -233,7 +233,7 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 
 	// Short patterns cannot contain the five-byte literal required by the
 	// direct path. Avoid inspecting their syntax tree on the ordinary path.
-	if !s.FileName && len(pattern) > len("(?i:abcd)(?-s:.)*") {
+	if !s.FileName && len(compiledPattern) > len("(?i:abcd)(?-s:.)*") {
 		litPref, isFold := extractFoldLiteralLinePrefix(s.Regexp)
 		// CaseSensitive may be overridden by a scoped regexp flag. Only use
 		// the byte matcher when the literal node itself is case-folded.
