@@ -619,7 +619,7 @@ func regexpMatchTreeRangesForRegexp(t *testing.T, re *query.Regexp, content []by
 		t.Fatalf("searcher type = %T, want *indexData", searcher)
 	}
 
-	mt := newRegexpMatchTree(re, id.metaData.PlainASCII)
+	mt := newRegexpMatchTree(re, id.metaData.PlainASCII, false)
 	if !usePrefix {
 		mt.foldedLiteral = nil
 	}
@@ -646,7 +646,7 @@ func TestRegexpPrefixDirectMatchRanges(t *testing.T) {
 	if !ok {
 		t.Fatalf("query type = %T, want *query.Regexp", q)
 	}
-	if newRegexpMatchTree(re, true).foldedLiteral == nil {
+	if newRegexpMatchTree(re, true, false).foldedLiteral == nil {
 		t.Fatal("expected direct regexp prefix path")
 	}
 
@@ -732,7 +732,7 @@ func TestRegexpPrefixNonASCIIShardDoesNotEnableByteMatcher(t *testing.T) {
 			if !ok {
 				t.Fatalf("query type = %T, want *query.Regexp", q)
 			}
-			if got := newRegexpMatchTree(re, false).foldedLiteral != nil; got != tc.want {
+			if got := newRegexpMatchTree(re, false, false).foldedLiteral != nil; got != tc.want {
 				t.Fatalf("has direct needle = %v, want %v", got, tc.want)
 			}
 		})
@@ -773,7 +773,7 @@ func TestRegexpPrefixEligibility(t *testing.T) {
 				t.Fatalf("query type = %T, want *query.Regexp", q)
 			}
 			re.CaseSensitive = tc.caseSensitive
-			if got := newRegexpMatchTree(re, true).foldedLiteral != nil; got != tc.want {
+			if got := newRegexpMatchTree(re, true, false).foldedLiteral != nil; got != tc.want {
 				t.Fatalf("has direct needle = %v, want %v", got, tc.want)
 			}
 		})
@@ -788,7 +788,7 @@ func TestRegexpPrefixScopedCaseDoesNotEnableByteMatcher(t *testing.T) {
 	mt := newRegexpMatchTree(&query.Regexp{
 		Regexp:        re,
 		CaseSensitive: false,
-	}, true)
+	}, true, false)
 	if mt.foldedLiteral != nil {
 		t.Fatal("scoped case-sensitive literal enabled the byte matcher")
 	}

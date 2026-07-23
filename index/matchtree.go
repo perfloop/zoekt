@@ -213,7 +213,7 @@ type regexpMatchTree struct {
 	foldedLiteral *syntax.Regexp
 }
 
-func newRegexpMatchTree(s *query.Regexp, shardPlainASCII bool) *regexpMatchTree {
+func newRegexpMatchTree(s *query.Regexp, shardPlainASCII, computeRegexpAll bool) *regexpMatchTree {
 	prefix := ""
 	if !s.CaseSensitive {
 		prefix = "(?i)"
@@ -231,7 +231,7 @@ func newRegexpMatchTree(s *query.Regexp, shardPlainASCII bool) *regexpMatchTree 
 	t := &regexpMatchTree{
 		regexp:       regexp.MustCompile(compiledPattern),
 		hybridRegexp: hr,
-		regexpAll:    isRegexpAll(s.Regexp),
+		regexpAll:    computeRegexpAll && isRegexpAll(s.Regexp),
 		fileName:     s.FileName,
 	}
 
@@ -1058,6 +1058,9 @@ type matchTreeOpt struct {
 	// DisableWordMatchOptimization is used to disable the use of wordMatchTree.
 	// This was added since we do not support wordMatchTree with symbol search.
 	DisableWordMatchOptimization bool
+
+	// ComputeRegexpAll is needed only when building a Symbol query.
+	ComputeRegexpAll bool
 }
 
 func (d *indexData) newMatchTree(q query.Q, opt matchTreeOpt) (matchTree, error) {
@@ -1088,7 +1091,7 @@ func (d *indexData) newMatchTree(q query.Q, opt matchTreeOpt) (matchTree, error)
 			// provide something faster.
 			tr = wmt
 		} else {
-			tr = newRegexpMatchTree(s, d.metaData.PlainASCII)
+			tr = newRegexpMatchTree(s, d.metaData.PlainASCII, opt.ComputeRegexpAll)
 		}
 
 		return &andMatchTree{
@@ -1225,6 +1228,7 @@ func (d *indexData) newMatchTree(q query.Q, opt matchTreeOpt) (matchTree, error)
 		// Disable WordMatchTree since we don't support it in symbols yet.
 		optCopy := opt
 		optCopy.DisableWordMatchOptimization = true
+		optCopy.ComputeRegexpAll = true
 
 		subMT, err := d.newMatchTree(s.Expr, optCopy)
 		if err != nil {
@@ -1373,7 +1377,7 @@ func (d *indexData) newSubstringMatchTree(s *query.Substring) (matchTree, error)
 			FileName:      s.FileName,
 			Content:       s.Content,
 			CaseSensitive: s.CaseSensitive,
-		}, d.metaData.PlainASCII), nil
+		}, false, false), nil
 	}
 
 	result, err := d.iterateNgrams(s)

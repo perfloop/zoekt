@@ -506,8 +506,7 @@ func (d *indexData) validatePlainASCII() {
 	if !d.metaData.PlainASCII {
 		return
 	}
-	if !plainASCIIBoundaries(d.boundaries, d.fileEndRunes) ||
-		!plainASCIIBoundaries(d.fileNameIndex, d.fileNameEndRunes) {
+	if !plainASCIIBoundaries(d.boundaries, d.fileEndRunes) {
 		d.metaData.PlainASCII = false
 	}
 }
