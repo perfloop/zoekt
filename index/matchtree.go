@@ -213,7 +213,7 @@ type regexpMatchTree struct {
 	foldedLiteral *syntax.Regexp
 }
 
-func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
+func newRegexpMatchTree(s *query.Regexp, shardPlainASCII bool) *regexpMatchTree {
 	prefix := ""
 	if !s.CaseSensitive {
 		prefix = "(?i)"
@@ -235,11 +235,13 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 		fileName:     s.FileName,
 	}
 
+	// The byte matcher is sound only in an ASCII-only shard: Unicode simple
+	// folds can add non-ASCII spellings that byte matching cannot represent.
 	// Compact patterns cannot encode the thirteen-byte literal required by the
 	// direct path, so they skip the prefix-shape extraction. Escaped literals can
 	// serialize longer despite having a short literal; they reach the shape check
 	// below and are rejected by its literal-length test.
-	if !s.FileName && len(compiledPattern) > len("(?i:abcdefghijkl)(?-s:.)*") {
+	if shardPlainASCII && !s.FileName && len(compiledPattern) > len("(?i:abcdefghijkl)(?-s:.)*") {
 		literal, isFold := extractFoldLiteralLinePrefix(s.Regexp)
 		// CaseSensitive may be overridden by a scoped regexp flag. Only use
 		// the byte matcher when the literal node itself is case-folded.
@@ -844,9 +846,6 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 	found := t.found[:0]
 	if t.foldedLiteral != nil {
 		needle := asciiFoldNeedleFromRunes(t.foldedLiteral.Rune)
-		if needle.needsUnicodeFallback() && !cp.contentIsASCII() {
-			goto fallback
-		}
 
 		// Bound scalar verification to one sixteenth of the document before the
 		// regular expression engine handles near-match-heavy input.
@@ -1089,7 +1088,7 @@ func (d *indexData) newMatchTree(q query.Q, opt matchTreeOpt) (matchTree, error)
 			// provide something faster.
 			tr = wmt
 		} else {
-			tr = newRegexpMatchTree(s)
+			tr = newRegexpMatchTree(s, d.metaData.PlainASCII)
 		}
 
 		return &andMatchTree{
@@ -1374,7 +1373,7 @@ func (d *indexData) newSubstringMatchTree(s *query.Substring) (matchTree, error)
 			FileName:      s.FileName,
 			Content:       s.Content,
 			CaseSensitive: s.CaseSensitive,
-		}), nil
+		}, d.metaData.PlainASCII), nil
 	}
 
 	result, err := d.iterateNgrams(s)
@@ -1549,9 +1548,6 @@ func queryMetaChecksum(field string, value *regexp.Regexp) string {
 
 type asciiFoldNeedle struct {
 	runes []rune
-
-	hasKelvinFold bool
-	hasLongSFold  bool
 }
 
 func isASCIILiteral(runes []rune) bool {
@@ -1564,22 +1560,7 @@ func isASCIILiteral(runes []rune) bool {
 }
 
 func asciiFoldNeedleFromRunes(runes []rune) asciiFoldNeedle {
-	needle := asciiFoldNeedle{runes: runes}
-	for _, r := range runes {
-		switch asciiFoldByte(byte(r)) {
-		case 'k':
-			needle.hasKelvinFold = true
-		case 's':
-			needle.hasLongSFold = true
-		}
-	}
-	return needle
-}
-
-func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
-	runes := []rune(needle)
-	result := asciiFoldNeedleFromRunes(runes)
-	return &result
+	return asciiFoldNeedle{runes: runes}
 }
 
 func asciiFoldByte(c byte) byte {
@@ -1593,24 +1574,20 @@ func (an *asciiFoldNeedle) len() int {
 	return len(an.runes)
 }
 
-// needsUnicodeFallback reports whether a byte matcher for this literal could
-// miss a non-ASCII simple-fold spelling.
-func (an *asciiFoldNeedle) needsUnicodeFallback() bool {
-	return an.hasKelvinFold || an.hasLongSFold
-}
-
-func (an *asciiFoldNeedle) matchesAt(haystack []byte, offset int) (bool, int) {
-	for j := 1; j < an.len(); j++ {
+// matchesAt verifies the literal starting at first and returns verification work.
+// A first-byte anchor starts at byte one; a second-byte anchor verifies byte zero.
+func (an *asciiFoldNeedle) matchesAt(haystack []byte, offset, first int) (bool, int) {
+	for j := first; j < an.len(); j++ {
 		target := asciiFoldByte(byte(an.runes[j]))
 		if target >= 'a' && target <= 'z' {
 			if haystack[offset+j]|0x20 != target {
-				return false, j
+				return false, j - first + 1
 			}
 		} else if haystack[offset+j] != target {
-			return false, j
+			return false, j - first + 1
 		}
 	}
-	return true, an.len() - 1
+	return true, an.len() - first
 }
 
 type asciiFoldCursor struct {
@@ -1689,7 +1666,7 @@ func (an *asciiFoldNeedle) find(haystack []byte, start int, budget *int, cursor 
 			return -1, false
 		}
 
-		matched, compared := an.matchesAt(haystack, i)
+		matched, compared := an.matchesAt(haystack, i, 1)
 		*budget -= compared
 		if *budget < 0 {
 			return -1, true
@@ -1719,7 +1696,7 @@ func (an *asciiFoldNeedle) findFromSecond(haystack []byte, start, limit int, bud
 		}
 
 		i := second - 1
-		matched, compared := an.matchesAt(haystack, i)
+		matched, compared := an.matchesAt(haystack, i, 0)
 		*budget -= compared
 		if *budget < 0 {
 			return -1, true

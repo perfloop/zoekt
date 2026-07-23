@@ -8,33 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/sourcegraph/zoekt"
 )
-
-func TestContentProviderContentIsASCII(t *testing.T) {
-	searcher := searcherForTest(t, testShardBuilder(t, nil,
-		Document{Name: "ascii.go", Content: []byte("plain ascii\n")},
-		Document{Name: "unicode.go", Content: []byte("unicode K\n")},
-	))
-	id, ok := searcher.(*indexData)
-	if !ok {
-		t.Fatalf("searcher type = %T, want *indexData", searcher)
-	}
-	cp := &contentProvider{id: id, stats: &zoekt.Stats{}}
-
-	for _, tc := range []struct {
-		doc  uint32
-		want bool
-	}{
-		{doc: 0, want: true},
-		{doc: 1, want: false},
-	} {
-		cp.setDocument(tc.doc)
-		if got := cp.contentIsASCII(); got != tc.want {
-			t.Errorf("contentIsASCII(%d) = %v, want %v", tc.doc, got, tc.want)
-		}
-	}
-}
 
 func getNewlines(data []byte) newlines {
 	var locs []uint32

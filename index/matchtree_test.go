@@ -619,7 +619,7 @@ func regexpMatchTreeRangesForRegexp(t *testing.T, re *query.Regexp, content []by
 		t.Fatalf("searcher type = %T, want *indexData", searcher)
 	}
 
-	mt := newRegexpMatchTree(re)
+	mt := newRegexpMatchTree(re, id.metaData.PlainASCII)
 	if !usePrefix {
 		mt.foldedLiteral = nil
 	}
@@ -646,7 +646,7 @@ func TestRegexpPrefixDirectMatchRanges(t *testing.T) {
 	if !ok {
 		t.Fatalf("query type = %T, want *query.Regexp", q)
 	}
-	if newRegexpMatchTree(re).foldedLiteral == nil {
+	if newRegexpMatchTree(re, true).foldedLiteral == nil {
 		t.Fatal("expected direct regexp prefix path")
 	}
 
@@ -702,6 +702,28 @@ func TestRegexpPrefixMatchesFullEngineForUnicodeFolds(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			content := []byte(tc.content)
+			want := regexpMatchTreeRanges(t, tc.pattern, content, false)
+			got := regexpMatchTreeRanges(t, tc.pattern, content, true)
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("match ranges differ (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestRegexpPrefixNonASCIIShardDoesNotEnableByteMatcher(t *testing.T) {
+	cases := []struct {
+		pattern string
+		want    bool
+	}{
+		{pattern: "(?i)smartprefixxx.*", want: false},
+		{pattern: "(?i)KelvinPrefixX.*", want: false},
+		{pattern: "(?i)imageprefixxx.*", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.pattern, func(t *testing.T) {
 			q, err := query.Parse(tc.pattern)
 			if err != nil {
 				t.Fatal(err)
@@ -710,15 +732,8 @@ func TestRegexpPrefixMatchesFullEngineForUnicodeFolds(t *testing.T) {
 			if !ok {
 				t.Fatalf("query type = %T, want *query.Regexp", q)
 			}
-			if newRegexpMatchTree(re).foldedLiteral == nil {
-				t.Fatal("expected direct regexp prefix path")
-			}
-
-			content := []byte(tc.content)
-			want := regexpMatchTreeRanges(t, tc.pattern, content, false)
-			got := regexpMatchTreeRanges(t, tc.pattern, content, true)
-			if diff := cmp.Diff(want, got); diff != "" {
-				t.Fatalf("match ranges differ (-want +got):\n%s", diff)
+			if got := newRegexpMatchTree(re, false).foldedLiteral != nil; got != tc.want {
+				t.Fatalf("has direct needle = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -758,7 +773,7 @@ func TestRegexpPrefixEligibility(t *testing.T) {
 				t.Fatalf("query type = %T, want *query.Regexp", q)
 			}
 			re.CaseSensitive = tc.caseSensitive
-			if got := newRegexpMatchTree(re).foldedLiteral != nil; got != tc.want {
+			if got := newRegexpMatchTree(re, true).foldedLiteral != nil; got != tc.want {
 				t.Fatalf("has direct needle = %v, want %v", got, tc.want)
 			}
 		})
@@ -773,7 +788,7 @@ func TestRegexpPrefixScopedCaseDoesNotEnableByteMatcher(t *testing.T) {
 	mt := newRegexpMatchTree(&query.Regexp{
 		Regexp:        re,
 		CaseSensitive: false,
-	})
+	}, true)
 	if mt.foldedLiteral != nil {
 		t.Fatal("scoped case-sensitive literal enabled the byte matcher")
 	}
@@ -808,7 +823,7 @@ func TestAsciiFoldNeedleFind(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			needle := newAsciiFoldNeedle(tc.needle)
+			needle := asciiFoldNeedleFromRunes([]rune(tc.needle))
 			data := []byte(tc.haystack)
 			budget := len(data) * needle.len()
 			cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
@@ -832,7 +847,7 @@ func TestAsciiFoldNeedleFind(t *testing.T) {
 }
 
 func TestAsciiFoldNeedleSwitchesToSecondByteAnchor(t *testing.T) {
-	needle := newAsciiFoldNeedle("Abcdefghijklm")
+	needle := asciiFoldNeedleFromRunes([]rune("Abcdefghijklm"))
 	data := []byte(strings.Repeat("Ax", firstByteMissLimit) + "aBcdefghijklm")
 	budget := len(data)
 	cursor := asciiFoldCursor{
@@ -854,8 +869,42 @@ func TestAsciiFoldNeedleSwitchesToSecondByteAnchor(t *testing.T) {
 	}
 }
 
+func TestAsciiFoldNeedleSecondAnchorChecksFirstByte(t *testing.T) {
+	const pattern = "(?i)Abcdefghijklm.*"
+	content := []byte(strings.Repeat("Ax", firstByteMissLimit) +
+		"xBcdefghijklm forged\n" + strings.Repeat("z", 2048))
+	needle := asciiFoldNeedleFromRunes([]rune("Abcdefghijklm"))
+	budget := len(content) / 16
+	cursor := asciiFoldCursor{
+		nextLower:       -1,
+		nextUpper:       -1,
+		nextSecondLower: -1,
+		nextSecondUpper: -1,
+	}
+
+	offset, exhausted := needle.find(content, 0, &budget, &cursor)
+	if exhausted {
+		t.Fatal("comparison budget exhausted")
+	}
+	if offset != -1 {
+		t.Fatalf("forged second-anchor match offset = %d, want -1", offset)
+	}
+	if !cursor.useSecond {
+		t.Fatal("expected the second-byte anchor after repeated first-byte misses")
+	}
+	if want := len(content)/16 - firstByteMissLimit - 1; budget != want {
+		t.Fatalf("comparison budget = %d, want %d", budget, want)
+	}
+
+	want := regexpMatchTreeRanges(t, pattern, content, false)
+	got := regexpMatchTreeRanges(t, pattern, content, true)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("second-anchor ranges differ (-want +got):\n%s", diff)
+	}
+}
+
 func TestAsciiFoldNeedleCursorKeepsAbsentCase(t *testing.T) {
-	needle := newAsciiFoldNeedle("ABC")
+	needle := asciiFoldNeedleFromRunes([]rune("ABC"))
 	data := []byte(strings.Repeat("ABC", 4))
 	budget := len(data)
 	cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
@@ -878,7 +927,7 @@ func TestAsciiFoldNeedleCursorKeepsAbsentCase(t *testing.T) {
 }
 
 func TestAsciiFoldNeedleFindBoundsPartialMatches(t *testing.T) {
-	needle := newAsciiFoldNeedle(strings.Repeat("A", 128) + "B")
+	needle := asciiFoldNeedleFromRunes([]rune(strings.Repeat("A", 128) + "B"))
 	data := []byte(strings.Repeat("A", 4096))
 	budget := 64
 	cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
