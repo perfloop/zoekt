@@ -911,7 +911,7 @@ func TestAsciiFoldNeedleFind(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			needle := asciiFoldNeedleFromRunes([]rune(tc.needle))
+			needle := asciiFoldNeedle{runes: []rune(tc.needle)}
 			data := []byte(tc.haystack)
 			budget := len(data) * needle.len()
 			cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
@@ -935,7 +935,7 @@ func TestAsciiFoldNeedleFind(t *testing.T) {
 }
 
 func TestAsciiFoldNeedleSwitchesToSecondByteAnchor(t *testing.T) {
-	needle := asciiFoldNeedleFromRunes([]rune("Abcdefghijklm"))
+	needle := asciiFoldNeedle{runes: []rune("Abcdefghijklm")}
 	data := []byte(strings.Repeat("Ax", firstByteMissLimit) + "aBcdefghijklm")
 	budget := len(data)
 	cursor := asciiFoldCursor{
@@ -961,7 +961,7 @@ func TestAsciiFoldNeedleSecondAnchorChecksFirstByte(t *testing.T) {
 	const pattern = "(?i)Abcdefghijklm.*"
 	content := []byte(strings.Repeat("Ax", firstByteMissLimit) +
 		"xBcdefghijklm forged\n" + strings.Repeat("z", 2048))
-	needle := asciiFoldNeedleFromRunes([]rune("Abcdefghijklm"))
+	needle := asciiFoldNeedle{runes: []rune("Abcdefghijklm")}
 	budget := len(content) / 16
 	cursor := asciiFoldCursor{
 		nextLower:       -1,
@@ -992,7 +992,7 @@ func TestAsciiFoldNeedleSecondAnchorChecksFirstByte(t *testing.T) {
 }
 
 func TestAsciiFoldNeedleCursorKeepsAbsentCase(t *testing.T) {
-	needle := asciiFoldNeedleFromRunes([]rune("ABC"))
+	needle := asciiFoldNeedle{runes: []rune("ABC")}
 	data := []byte(strings.Repeat("ABC", 4))
 	budget := len(data)
 	cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
@@ -1015,7 +1015,7 @@ func TestAsciiFoldNeedleCursorKeepsAbsentCase(t *testing.T) {
 }
 
 func TestAsciiFoldNeedleFindBoundsPartialMatches(t *testing.T) {
-	needle := asciiFoldNeedleFromRunes([]rune(strings.Repeat("A", 128) + "B"))
+	needle := asciiFoldNeedle{runes: []rune(strings.Repeat("A", 128) + "B")}
 	data := []byte(strings.Repeat("A", 4096))
 	budget := 64
 	cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}

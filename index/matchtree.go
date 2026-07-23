@@ -845,7 +845,7 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 
 	found := t.found[:0]
 	if t.foldedLiteral != nil && isPlainASCII(data) {
-		needle := asciiFoldNeedleFromRunes(t.foldedLiteral.Rune)
+		needle := asciiFoldNeedle{runes: t.foldedLiteral.Rune}
 
 		// Bound scalar verification to one sixteenth of the document before the
 		// regular expression engine handles near-match-heavy input.
@@ -1573,10 +1573,6 @@ func isPlainASCII(data []byte) bool {
 		}
 	}
 	return true
-}
-
-func asciiFoldNeedleFromRunes(runes []rune) asciiFoldNeedle {
-	return asciiFoldNeedle{runes: runes}
 }
 
 func asciiFoldByte(c byte) byte {
