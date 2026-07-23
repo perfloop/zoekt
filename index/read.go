@@ -385,6 +385,7 @@ func (r *reader) readIndexData(toc *indexTOC) (*indexData, error) {
 
 	d.runeOffsets = makeRuneOffsetMap(runeOffsets)
 	d.fileNameRuneOffsets = makeRuneOffsetMap(fileNameRuneOffsets)
+	d.validatePlainASCII()
 
 	d.subRepoPaths = make([][]string, 0, len(d.repoMetaData))
 	for i := range d.repoMetaData {
@@ -496,6 +497,34 @@ func (d *indexData) newBtreeIndex(ngramSec simpleSection, postings compoundSecti
 	bi.postingIndex = postings.index
 
 	return bi, nil
+}
+
+// validatePlainASCII checks the metadata capability against the independently
+// stored byte and rune boundaries. Metadata can be updated independently of
+// the index payload, so a stale capability must fail closed.
+func (d *indexData) validatePlainASCII() {
+	if !d.metaData.PlainASCII {
+		return
+	}
+	if !plainASCIIBoundaries(d.boundaries, d.fileEndRunes) ||
+		!plainASCIIBoundaries(d.fileNameIndex, d.fileNameEndRunes) {
+		d.metaData.PlainASCII = false
+	}
+}
+
+func plainASCIIBoundaries(byteBoundaries, runeBoundaries []uint32) bool {
+	if len(byteBoundaries) != len(runeBoundaries)+1 {
+		return false
+	}
+
+	var previousRunes uint32
+	for i, endRunes := range runeBoundaries {
+		if byteBoundaries[i+1]-byteBoundaries[i] != endRunes-previousRunes {
+			return false
+		}
+		previousRunes = endRunes
+	}
+	return true
 }
 
 func (d *indexData) verify() error {

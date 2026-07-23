@@ -79,6 +79,81 @@ func TestReadWrite(t *testing.T) {
 	}
 }
 
+func TestNewSearcherRejectsStalePlainASCIIMetadata(t *testing.T) {
+	const pattern = "(?i)KelvinPrefixX.*"
+	content := []byte("KelvinPrefixX scale\n")
+	builder := testShardBuilder(t, nil, Document{
+		Name:    "kelvin.go",
+		Content: content,
+	})
+
+	var buf bytes.Buffer
+	if err := builder.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	original := append([]byte(nil), buf.Bytes()...)
+	tampered := append([]byte(nil), original...)
+
+	reference, err := NewSearcher(&memSeeker{data: original})
+	if err != nil {
+		t.Fatalf("NewSearcher(reference): %v", err)
+	}
+
+	rd := reader{r: &memSeeker{data: tampered}}
+	var toc indexTOC
+	if err := rd.readTOC(&toc); err != nil {
+		t.Fatal(err)
+	}
+	metadata := tampered[toc.metaData.off : toc.metaData.off+toc.metaData.sz]
+	old := []byte(`"PlainASCII":false`)
+	new := []byte(`"PlainASCII":true `)
+	if len(old) != len(new) {
+		t.Fatal("metadata replacement changed section length")
+	}
+	at := bytes.Index(metadata, old)
+	if at < 0 {
+		t.Fatalf("metadata does not contain %q", old)
+	}
+	copy(metadata[at:at+len(old)], new)
+
+	searcher, err := NewSearcher(&memSeeker{data: tampered})
+	if err != nil {
+		t.Fatalf("NewSearcher(tampered): %v", err)
+	}
+	index, ok := searcher.(*indexData)
+	if !ok {
+		t.Fatalf("searcher type = %T, want *indexData", searcher)
+	}
+	if index.metaData.PlainASCII {
+		t.Fatal("stale PlainASCII metadata enabled the byte matcher")
+	}
+
+	q, err := query.Parse(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findRanges := func(s zoekt.Searcher) [][2]uint32 {
+		res, err := s.Search(context.Background(), q, &zoekt.SearchOptions{ChunkMatches: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ranges [][2]uint32
+		for _, file := range res.Files {
+			for _, chunk := range file.ChunkMatches {
+				for _, r := range chunk.Ranges {
+					ranges = append(ranges, [2]uint32{r.Start.ByteOffset, r.End.ByteOffset})
+				}
+			}
+		}
+		return ranges
+	}
+
+	want := findRanges(reference)
+	if got := findRanges(searcher); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges differ: got %v, want %v", got, want)
+	}
+}
+
 func TestReadWriteNames(t *testing.T) {
 	b, err := NewShardBuilder(nil)
 	if err != nil {
