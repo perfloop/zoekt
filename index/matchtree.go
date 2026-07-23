@@ -844,7 +844,7 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 	data := cp.data(t.fileName)
 
 	found := t.found[:0]
-	if t.foldedLiteral != nil {
+	if t.foldedLiteral != nil && isPlainASCII(data) {
 		needle := asciiFoldNeedleFromRunes(t.foldedLiteral.Rune)
 
 		// Bound scalar verification to one sixteenth of the document before the
@@ -1557,6 +1557,18 @@ type asciiFoldNeedle struct {
 func isASCIILiteral(runes []rune) bool {
 	for _, r := range runes {
 		if r >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// isPlainASCII checks the raw document bytes before using the byte-only
+// FoldCase matcher. Derived shard metadata can only be a coarse eligibility
+// hint because imported metadata and boundary summaries can be stale.
+func isPlainASCII(data []byte) bool {
+	for _, b := range data {
+		if b >= utf8.RuneSelf {
 			return false
 		}
 	}

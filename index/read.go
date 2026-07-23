@@ -499,9 +499,9 @@ func (d *indexData) newBtreeIndex(ngramSec simpleSection, postings compoundSecti
 	return bi, nil
 }
 
-// validatePlainASCII checks the metadata capability against the independently
-// stored byte and rune boundaries. Metadata can be updated independently of
-// the index payload, so a stale capability must fail closed.
+// validatePlainASCII applies a cheap consistency check to the metadata hint
+// using the stored boundaries. The byte-only matcher separately checks raw
+// document content before it relies on this hint.
 func (d *indexData) validatePlainASCII() {
 	if !d.metaData.PlainASCII {
 		return

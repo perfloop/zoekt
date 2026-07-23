@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -150,6 +151,91 @@ func TestNewSearcherRejectsStalePlainASCIIMetadata(t *testing.T) {
 
 	want := findRanges(reference)
 	if got := findRanges(searcher); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges differ: got %v, want %v", got, want)
+	}
+}
+
+func TestNewSearcherRejectsCoherentlyForgedPlainASCII(t *testing.T) {
+	if os.Getenv("ZOEKT_RE2_THRESHOLD_BYTES") != "0" {
+		env := os.Environ()
+		configured := false
+		for i, entry := range env {
+			if strings.HasPrefix(entry, "ZOEKT_RE2_THRESHOLD_BYTES=") {
+				env[i] = "ZOEKT_RE2_THRESHOLD_BYTES=0"
+				configured = true
+				break
+			}
+		}
+		if !configured {
+			env = append(env, "ZOEKT_RE2_THRESHOLD_BYTES=0")
+		}
+
+		cmd := exec.Command(os.Args[0], "-test.run=^TestNewSearcherRejectsCoherentlyForgedPlainASCII$")
+		cmd.Env = env
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("RE2 subprocess failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	const pattern = "(?i)KelvinPrefixX.*"
+	content := []byte("KelvinPrefixX scale\n")
+	builder := testShardBuilder(t, nil, Document{
+		Name:    "kelvin.go",
+		Content: content,
+	})
+
+	var referenceData bytes.Buffer
+	if err := builder.Write(&referenceData); err != nil {
+		t.Fatal(err)
+	}
+	reference, err := NewSearcher(&memSeeker{data: referenceData.Bytes()})
+	if err != nil {
+		t.Fatalf("NewSearcher(reference): %v", err)
+	}
+	defer reference.Close()
+
+	if len(builder.contentPostings.endRunes) != 1 {
+		t.Fatalf("content end-rune entries = %d, want 1", len(builder.contentPostings.endRunes))
+	}
+	builder.contentPostings.isPlainASCII = true
+	builder.contentPostings.endRunes[0] = uint32(len(content))
+
+	var forgedData bytes.Buffer
+	if err := builder.Write(&forgedData); err != nil {
+		t.Fatal(err)
+	}
+	forged, err := NewSearcher(&memSeeker{data: forgedData.Bytes()})
+	if err != nil {
+		t.Fatalf("NewSearcher(forged): %v", err)
+	}
+	defer forged.Close()
+
+	q, err := query.Parse(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findRanges := func(s zoekt.Searcher) [][2]uint32 {
+		res, err := s.Search(context.Background(), q, &zoekt.SearchOptions{ChunkMatches: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ranges [][2]uint32
+		for _, file := range res.Files {
+			for _, chunk := range file.ChunkMatches {
+				for _, r := range chunk.Ranges {
+					ranges = append(ranges, [2]uint32{r.Start.ByteOffset, r.End.ByteOffset})
+				}
+			}
+		}
+		return ranges
+	}
+
+	want := findRanges(reference)
+	if len(want) == 0 {
+		t.Fatal("RE2 reference did not match the Kelvin-sign spelling")
+	}
+	if got := findRanges(forged); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ranges differ: got %v, want %v", got, want)
 	}
 }
