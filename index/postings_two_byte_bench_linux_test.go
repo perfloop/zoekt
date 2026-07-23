@@ -4,6 +4,7 @@ package index
 
 import (
 	"bytes"
+	"encoding/binary"
 	"syscall"
 	"testing"
 )
@@ -37,20 +38,54 @@ func BenchmarkPostingsTwoByteDeltas(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	startCPU := benchmarkProcessCPUTime(b)
+	var targetCPU, referenceCPU int64
 	var encodedBytes int
-	for b.Loop() {
+	var referenceChecksum byte
+	measureTarget := func() {
+		startCPU := benchmarkProcessCPUTime(b)
 		if _, _, err := pb.newSearchableString(data, nil); err != nil {
 			b.Fatal(err)
 		}
 		encodedBytes += len(pb.asciiPostings[asciiNgramIndex('a', 'a', 'a')].data)
 		pb.reset()
+		targetCPU += benchmarkProcessCPUTime(b) - startCPU
 	}
-	cpuNanos := benchmarkProcessCPUTime(b) - startCPU
-	b.ReportMetric(float64(cpuNanos)/float64(b.N), "cpu-ns/op")
-	if encodedBytes == 0 {
+	measureReference := func() {
+		startCPU := benchmarkProcessCPUTime(b)
+		referenceChecksum += benchmarkTwoByteVarintReference(len(data) * 7)
+		referenceCPU += benchmarkProcessCPUTime(b) - startCPU
+	}
+	for iteration := 0; b.Loop(); iteration++ {
+		if iteration&1 == 0 {
+			measureTarget()
+			measureReference()
+		} else {
+			measureReference()
+			measureTarget()
+		}
+	}
+	if referenceCPU <= 0 {
+		b.Fatal("benchmark measured no reference CPU time")
+	}
+	b.ReportMetric(float64(targetCPU)/float64(referenceCPU), "relative-cpu-cost")
+	if encodedBytes == 0 || referenceChecksum == 0xff {
 		b.Fatal("benchmark produced no postings")
 	}
+}
+
+// benchmarkTwoByteVarintReference is an unchanged, same-process CPU control.
+// The inputs are runtime-varying two-byte uvarints and the returned checksum
+// keeps the encoding work live.
+//
+//go:noinline
+func benchmarkTwoByteVarintReference(iterations int) byte {
+	var buf [binary.MaxVarintLen64]byte
+	var checksum byte
+	for i := range iterations {
+		n := binary.PutUvarint(buf[:], uint64(216+256*(i&1)))
+		checksum ^= buf[0] ^ buf[n-1]
+	}
+	return checksum
 }
 
 func benchmarkProcessCPUTime(b *testing.B) int64 {
