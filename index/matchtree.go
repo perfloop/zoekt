@@ -206,8 +206,9 @@ type regexpMatchTree struct {
 	// nextDoc, prepare.
 	bruteForceMatchTree
 
-	hasPrefix bool
-	needle    *asciiFoldNeedle
+	hasPrefix      bool
+	matchToLineEnd bool
+	needle         *asciiFoldNeedle
 }
 
 func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
@@ -233,21 +234,20 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 	}
 
 	if !s.FileName {
-		litPref, isFold := extractLiteralPrefixWithFold(s.Regexp)
-		if !s.CaseSensitive {
-			isFold = true
-		}
+		litPref, isFold, matchToLineEnd := extractFoldLiteralMatch(s.Regexp)
+		// CaseSensitive may be overridden by a scoped regexp flag. Only use
+		// the byte matcher when the literal node itself is case-folded.
 		if isFold && len(litPref) >= 3 {
 			isEligible := true
 			for i := 0; i < len(litPref); i++ {
-				c := litPref[i]
-				if c >= 128 || c == 'k' || c == 'K' || c == 's' || c == 'S' || c == 'i' || c == 'I' {
+				if litPref[i] >= 128 {
 					isEligible = false
 					break
 				}
 			}
 			if isEligible {
 				t.hasPrefix = true
+				t.matchToLineEnd = matchToLineEnd
 				t.needle = newAsciiFoldNeedle(litPref)
 			}
 		}
@@ -848,13 +848,46 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 
 	found := t.found[:0]
 	if t.hasPrefix {
-		if !t.needle.exists(data) {
-			t.found = found
-			t.reEvaluated = true
-			return matchesNone
+		if t.needle.hasUnicodeFold(data) {
+			goto fallback
 		}
+
+		// Bound scalar verification to one sixteenth of the document before the
+		// regular expression engine handles near-match-heavy input.
+		comparisonBudget := len(data) / 16
+		cursor := newAsciiFoldCursor()
+		for offset := 0; ; {
+			matchOffset, exhausted := t.needle.find(data, offset, &comparisonBudget, &cursor)
+			if exhausted {
+				goto fallback
+			}
+			if matchOffset < 0 {
+				break
+			}
+
+			end := matchOffset + len(t.needle.targets)
+			if t.matchToLineEnd {
+				if lineEnd := bytes.IndexByte(data[end:], '\n'); lineEnd >= 0 {
+					end += lineEnd
+				} else {
+					end = len(data)
+				}
+			}
+
+			found = append(found, &candidateMatch{
+				byteOffset:  uint32(matchOffset),
+				byteMatchSz: uint32(end - matchOffset),
+				fileName:    t.fileName,
+			})
+			offset = end
+		}
+		t.found = found
+		t.reEvaluated = true
+		return matchesStateForSlice(t.found)
 	}
 
+fallback:
+	found = found[:0]
 	// For file content, use hybridRegexp which dispatches to go-re2 when
 	// len(data) >= ZOEKT_RE2_THRESHOLD_BYTES. For filename matching, use
 	// grafana/regexp directly: filenames are always short, so the WASM
@@ -1518,15 +1551,27 @@ func queryMetaChecksum(field string, value *regexp.Regexp) string {
 type asciiFoldNeedle struct {
 	masks   []byte
 	targets []byte
+
+	hasKelvinFold bool
+	hasLongSFold  bool
+	hasIFold      bool
 }
+
+var (
+	kelvinSign = []byte("K")
+	longS      = []byte("ſ")
+	dottedI    = []byte("İ")
+	dotlessI   = []byte("ı")
+)
 
 func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
 	masks := make([]byte, len(needle))
 	targets := make([]byte, len(needle))
+	var hasKelvinFold, hasLongSFold, hasIFold bool
 	for i := 0; i < len(needle); i++ {
 		c := needle[i]
 		if c >= 'A' && c <= 'Z' {
-			c = c + 32
+			c += 'a' - 'A'
 		}
 		if c >= 'a' && c <= 'z' {
 			masks[i] = 0x20
@@ -1535,113 +1580,158 @@ func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
 			masks[i] = 0x00
 			targets[i] = c
 		}
+
+		switch c {
+		case 'k':
+			hasKelvinFold = true
+		case 's':
+			hasLongSFold = true
+		case 'i':
+			hasIFold = true
+		}
 	}
-	return &asciiFoldNeedle{masks: masks, targets: targets}
+	return &asciiFoldNeedle{
+		masks:         masks,
+		targets:       targets,
+		hasKelvinFold: hasKelvinFold,
+		hasLongSFold:  hasLongSFold,
+		hasIFold:      hasIFold,
+	}
 }
 
-func (an *asciiFoldNeedle) exists(haystack []byte) bool {
+// hasUnicodeFold detects non-ASCII spellings that the byte matcher cannot
+// recognize, so callers can use the regular expression engine instead.
+func (an *asciiFoldNeedle) hasUnicodeFold(haystack []byte) bool {
+	return (an.hasKelvinFold && bytes.Contains(haystack, kelvinSign)) ||
+		(an.hasLongSFold && bytes.Contains(haystack, longS)) ||
+		(an.hasIFold && (bytes.Contains(haystack, dottedI) || bytes.Contains(haystack, dotlessI)))
+}
+
+func (an *asciiFoldNeedle) matchesAt(haystack []byte, offset int) (bool, int) {
+	for j := 1; j < len(an.targets); j++ {
+		if (haystack[offset+j] | an.masks[j]) != an.targets[j] {
+			return false, j
+		}
+	}
+	return true, len(an.targets) - 1
+}
+
+type asciiFoldCursor struct {
+	nextLower int
+	nextUpper int
+}
+
+func newAsciiFoldCursor() asciiFoldCursor {
+	return asciiFoldCursor{nextLower: -1, nextUpper: -1}
+}
+
+// find returns the next ASCII-folded literal match. The comparison budget
+// bounds scalar verification work; once it is spent, the caller falls back to
+// the regular expression engine. cursor carries first-byte positions across
+// returned matches so a missing case variant is scanned only once.
+func (an *asciiFoldNeedle) find(haystack []byte, start int, budget *int, cursor *asciiFoldCursor) (offset int, exhausted bool) {
 	n := len(an.targets)
 	if n == 0 || len(haystack) < n {
-		return false
+		return -1, false
 	}
-	m0 := an.masks[0]
-	t0 := an.targets[0]
+
 	limit := len(haystack) - n
+	if start > limit {
+		return -1, false
+	}
 
-	i := 0
-	if m0 == 0x20 {
-		t0Upper := t0 - 32
-		nextT0 := -1
-		nextT0Upper := -1
+	t0 := an.targets[0]
+	i := start
+	if an.masks[0] == 0x20 {
+		t0Upper := t0 - ('a' - 'A')
 		for i <= limit {
-			if nextT0 < i {
+			if cursor.nextLower < i {
 				idx := bytes.IndexByte(haystack[i:limit+1], t0)
-				if idx >= 0 {
-					nextT0 = i + idx
+				if idx < 0 {
+					cursor.nextLower = limit + 1
 				} else {
-					nextT0 = limit + 1
+					cursor.nextLower = i + idx
 				}
 			}
-			if nextT0Upper < i {
+			if cursor.nextUpper < i {
 				idx := bytes.IndexByte(haystack[i:limit+1], t0Upper)
-				if idx >= 0 {
-					nextT0Upper = i + idx
+				if idx < 0 {
+					cursor.nextUpper = limit + 1
 				} else {
-					nextT0Upper = limit + 1
+					cursor.nextUpper = i + idx
 				}
 			}
 
-			next := -1
-			if nextT0 <= limit && nextT0Upper <= limit {
-				if nextT0 < nextT0Upper {
-					next = nextT0
-				} else {
-					next = nextT0Upper
-				}
-			} else if nextT0 <= limit {
-				next = nextT0
-			} else if nextT0Upper <= limit {
-				next = nextT0Upper
+			next := cursor.nextLower
+			if cursor.nextUpper < next {
+				next = cursor.nextUpper
 			}
-
-			if next < 0 {
-				return false
+			if next > limit {
+				return -1, false
 			}
 
 			i = next
-
-			match := true
-			for j := 1; j < n; j++ {
-				if (haystack[i+j] | an.masks[j]) != an.targets[j] {
-					match = false
-					break
-				}
+			matched, compared := an.matchesAt(haystack, i)
+			*budget -= compared
+			if *budget < 0 {
+				return -1, true
 			}
-			if match {
-				return true
+			if matched {
+				return i, false
 			}
 			i++
 		}
-	} else {
-		for i <= limit {
-			idx := bytes.IndexByte(haystack[i:limit+1], t0)
-			if idx < 0 {
-				return false
-			}
-			i += idx
-
-			match := true
-			for j := 1; j < n; j++ {
-				if (haystack[i+j] | an.masks[j]) != an.targets[j] {
-					match = false
-					break
-				}
-			}
-			if match {
-				return true
-			}
-			i++
-		}
+		return -1, false
 	}
-	return false
+
+	for i <= limit {
+		idx := bytes.IndexByte(haystack[i:limit+1], t0)
+		if idx < 0 {
+			return -1, false
+		}
+		i += idx
+		matched, compared := an.matchesAt(haystack, i)
+		*budget -= compared
+		if *budget < 0 {
+			return -1, true
+		}
+		if matched {
+			return i, false
+		}
+		i++
+	}
+	return -1, false
 }
 
-func extractLiteralPrefixWithFold(re *syntax.Regexp) (prefix string, isFold bool) {
+func extractFoldLiteralMatch(re *syntax.Regexp) (prefix string, isFold, matchToLineEnd bool) {
+	for re != nil && re.Op == syntax.OpCapture && len(re.Sub) == 1 {
+		re = re.Sub[0]
+	}
 	if re == nil {
-		return "", false
+		return "", false, false
 	}
-	switch re.Op {
-	case syntax.OpLiteral:
-		fold := re.Flags&syntax.FoldCase != 0
-		return string(re.Rune), fold
-	case syntax.OpCapture:
-		if len(re.Sub) > 0 {
-			return extractLiteralPrefixWithFold(re.Sub[0])
-		}
-	case syntax.OpConcat:
-		if len(re.Sub) > 0 {
-			return extractLiteralPrefixWithFold(re.Sub[0])
-		}
+
+	if re.Op == syntax.OpLiteral {
+		return string(re.Rune), re.Flags&syntax.FoldCase != 0, false
 	}
-	return "", false
+	if re.Op != syntax.OpConcat || len(re.Sub) != 2 || !isRegexpLineSuffix(re.Sub[1]) {
+		return "", false, false
+	}
+
+	literal := re.Sub[0]
+	for literal.Op == syntax.OpCapture && len(literal.Sub) == 1 {
+		literal = literal.Sub[0]
+	}
+	if literal.Op != syntax.OpLiteral {
+		return "", false, false
+	}
+	return string(literal.Rune), literal.Flags&syntax.FoldCase != 0, true
+}
+
+func isRegexpLineSuffix(re *syntax.Regexp) bool {
+	for re != nil && re.Op == syntax.OpCapture && len(re.Sub) == 1 {
+		re = re.Sub[0]
+	}
+	return re != nil && re.Op == syntax.OpStar && re.Flags&syntax.NonGreedy == 0 &&
+		len(re.Sub) == 1 && re.Sub[0].Op == syntax.OpAnyCharNotNL
 }
