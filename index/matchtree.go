@@ -206,9 +206,7 @@ type regexpMatchTree struct {
 	// nextDoc, prepare.
 	bruteForceMatchTree
 
-	hasPrefix      bool
-	matchToLineEnd bool
-	needle         *asciiFoldNeedle
+	needle *asciiFoldNeedle
 }
 
 func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
@@ -234,10 +232,10 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 	}
 
 	if !s.FileName {
-		litPref, isFold, matchToLineEnd := extractFoldLiteralMatch(s.Regexp)
+		litPref, isFold := extractFoldLiteralLinePrefix(s.Regexp)
 		// CaseSensitive may be overridden by a scoped regexp flag. Only use
 		// the byte matcher when the literal node itself is case-folded.
-		if isFold && len(litPref) > 3 {
+		if isFold && len(litPref) > 4 {
 			isEligible := true
 			for i := 0; i < len(litPref); i++ {
 				if litPref[i] >= 128 {
@@ -246,8 +244,6 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 				}
 			}
 			if isEligible {
-				t.hasPrefix = true
-				t.matchToLineEnd = matchToLineEnd
 				t.needle = newAsciiFoldNeedle(litPref)
 			}
 		}
@@ -847,7 +843,7 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 	data := cp.data(t.fileName)
 
 	found := t.found[:0]
-	if t.hasPrefix {
+	if t.needle != nil {
 		if t.needle.hasUnicodeFold(data) {
 			goto fallback
 		}
@@ -855,7 +851,7 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 		// Bound scalar verification to one sixteenth of the document before the
 		// regular expression engine handles near-match-heavy input.
 		comparisonBudget := len(data) / 16
-		cursor := newAsciiFoldCursor()
+		cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
 		for offset := 0; ; {
 			matchOffset, exhausted := t.needle.find(data, offset, &comparisonBudget, &cursor)
 			if exhausted {
@@ -866,12 +862,10 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 			}
 
 			end := matchOffset + len(t.needle.targets)
-			if t.matchToLineEnd {
-				if lineEnd := bytes.IndexByte(data[end:], '\n'); lineEnd >= 0 {
-					end += lineEnd
-				} else {
-					end = len(data)
-				}
+			if lineEnd := bytes.IndexByte(data[end:], '\n'); lineEnd >= 0 {
+				end += lineEnd
+			} else {
+				end = len(data)
 			}
 
 			found = append(found, &candidateMatch{
@@ -1621,10 +1615,6 @@ type asciiFoldCursor struct {
 	nextUpper int
 }
 
-func newAsciiFoldCursor() asciiFoldCursor {
-	return asciiFoldCursor{nextLower: -1, nextUpper: -1}
-}
-
 // find returns the next ASCII-folded literal match. The comparison budget
 // bounds scalar verification work; once it is spent, the caller falls back to
 // the regular expression engine. cursor carries first-byte positions across
@@ -1703,19 +1693,12 @@ func (an *asciiFoldNeedle) find(haystack []byte, start int, budget *int, cursor 
 	return -1, false
 }
 
-func extractFoldLiteralMatch(re *syntax.Regexp) (prefix string, isFold, matchToLineEnd bool) {
+func extractFoldLiteralLinePrefix(re *syntax.Regexp) (prefix string, isFold bool) {
 	for re != nil && re.Op == syntax.OpCapture && len(re.Sub) == 1 {
 		re = re.Sub[0]
 	}
-	if re == nil {
-		return "", false, false
-	}
-
-	if re.Op == syntax.OpLiteral {
-		return string(re.Rune), re.Flags&syntax.FoldCase != 0, false
-	}
-	if re.Op != syntax.OpConcat || len(re.Sub) != 2 || !isRegexpLineSuffix(re.Sub[1]) {
-		return "", false, false
+	if re == nil || re.Op != syntax.OpConcat || len(re.Sub) != 2 || !isRegexpLineSuffix(re.Sub[1]) {
+		return "", false
 	}
 
 	literal := re.Sub[0]
@@ -1723,9 +1706,9 @@ func extractFoldLiteralMatch(re *syntax.Regexp) (prefix string, isFold, matchToL
 		literal = literal.Sub[0]
 	}
 	if literal.Op != syntax.OpLiteral {
-		return "", false, false
+		return "", false
 	}
-	return string(literal.Rune), literal.Flags&syntax.FoldCase != 0, true
+	return string(literal.Rune), literal.Flags&syntax.FoldCase != 0
 }
 
 func isRegexpLineSuffix(re *syntax.Regexp) bool {
