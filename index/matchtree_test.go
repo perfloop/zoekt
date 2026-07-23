@@ -621,7 +621,7 @@ func regexpMatchTreeRangesForRegexp(t *testing.T, re *query.Regexp, content []by
 
 	mt := newRegexpMatchTree(re)
 	if !usePrefix {
-		mt.needle = nil
+		mt.foldedLiteral = nil
 	}
 	cp := &contentProvider{id: id, stats: &zoekt.Stats{}}
 	cp.setDocument(0)
@@ -646,7 +646,7 @@ func TestRegexpPrefixDirectMatchRanges(t *testing.T) {
 	if !ok {
 		t.Fatalf("query type = %T, want *query.Regexp", q)
 	}
-	if newRegexpMatchTree(re).needle == nil {
+	if newRegexpMatchTree(re).foldedLiteral == nil {
 		t.Fatal("expected direct regexp prefix path")
 	}
 
@@ -710,7 +710,7 @@ func TestRegexpPrefixMatchesFullEngineForUnicodeFolds(t *testing.T) {
 			if !ok {
 				t.Fatalf("query type = %T, want *query.Regexp", q)
 			}
-			if newRegexpMatchTree(re).needle == nil {
+			if newRegexpMatchTree(re).foldedLiteral == nil {
 				t.Fatal("expected direct regexp prefix path")
 			}
 
@@ -758,7 +758,7 @@ func TestRegexpPrefixEligibility(t *testing.T) {
 				t.Fatalf("query type = %T, want *query.Regexp", q)
 			}
 			re.CaseSensitive = tc.caseSensitive
-			if got := newRegexpMatchTree(re).needle != nil; got != tc.want {
+			if got := newRegexpMatchTree(re).foldedLiteral != nil; got != tc.want {
 				t.Fatalf("has direct needle = %v, want %v", got, tc.want)
 			}
 		})
@@ -774,7 +774,7 @@ func TestRegexpPrefixScopedCaseDoesNotEnableByteMatcher(t *testing.T) {
 		Regexp:        re,
 		CaseSensitive: false,
 	})
-	if mt.needle != nil {
+	if mt.foldedLiteral != nil {
 		t.Fatal("scoped case-sensitive literal enabled the byte matcher")
 	}
 }
@@ -810,7 +810,7 @@ func TestAsciiFoldNeedleFind(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			needle := newAsciiFoldNeedle(tc.needle)
 			data := []byte(tc.haystack)
-			budget := len(data)
+			budget := len(data) * needle.len()
 			cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
 			var got []int
 			for start := 0; ; {
@@ -822,12 +822,35 @@ func TestAsciiFoldNeedleFind(t *testing.T) {
 					break
 				}
 				got = append(got, offset)
-				start = offset + len(needle.targets)
+				start = offset + needle.len()
 			}
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Fatalf("offsets differ (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestAsciiFoldNeedleSwitchesToSecondByteAnchor(t *testing.T) {
+	needle := newAsciiFoldNeedle("Abcdefghijklm")
+	data := []byte(strings.Repeat("Ax", firstByteMissLimit) + "aBcdefghijklm")
+	budget := len(data)
+	cursor := asciiFoldCursor{
+		nextLower:       -1,
+		nextUpper:       -1,
+		nextSecondLower: -1,
+		nextSecondUpper: -1,
+	}
+
+	got, exhausted := needle.find(data, 0, &budget, &cursor)
+	if exhausted {
+		t.Fatal("comparison budget exhausted")
+	}
+	if want := firstByteMissLimit * len("Ax"); got != want {
+		t.Fatalf("match offset = %d, want %d", got, want)
+	}
+	if !cursor.useSecond {
+		t.Fatal("expected the second-byte anchor after repeated first-byte misses")
 	}
 }
 
@@ -841,15 +864,15 @@ func TestAsciiFoldNeedleCursorKeepsAbsentCase(t *testing.T) {
 	if exhausted || first != 0 {
 		t.Fatalf("first match = %d, exhausted = %v", first, exhausted)
 	}
-	if want := len(data) - len(needle.targets) + 1; cursor.nextLower != want {
+	if want := len(data) - needle.len() + 1; cursor.nextLower != want {
 		t.Fatalf("nextLower = %d, want %d", cursor.nextLower, want)
 	}
 
-	second, exhausted := needle.find(data, len(needle.targets), &budget, &cursor)
-	if exhausted || second != len(needle.targets) {
+	second, exhausted := needle.find(data, needle.len(), &budget, &cursor)
+	if exhausted || second != needle.len() {
 		t.Fatalf("second match = %d, exhausted = %v", second, exhausted)
 	}
-	if want := len(data) - len(needle.targets) + 1; cursor.nextLower != want {
+	if want := len(data) - needle.len() + 1; cursor.nextLower != want {
 		t.Fatalf("nextLower after second match = %d, want %d", cursor.nextLower, want)
 	}
 }
@@ -857,7 +880,7 @@ func TestAsciiFoldNeedleCursorKeepsAbsentCase(t *testing.T) {
 func TestAsciiFoldNeedleFindBoundsPartialMatches(t *testing.T) {
 	needle := newAsciiFoldNeedle(strings.Repeat("A", 128) + "B")
 	data := []byte(strings.Repeat("A", 4096))
-	budget := len(data)
+	budget := 64
 	cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
 	_, exhausted := needle.find(data, 0, &budget, &cursor)
 	if !exhausted {

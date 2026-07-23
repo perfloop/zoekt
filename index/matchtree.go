@@ -207,7 +207,10 @@ type regexpMatchTree struct {
 	// nextDoc, prepare.
 	bruteForceMatchTree
 
-	needle *asciiFoldNeedle
+	// foldedLiteral points into the parsed regexp. The direct matcher derives its
+	// stack-local byte view on demand, so fallback-only documents do not allocate
+	// candidate-scanning state.
+	foldedLiteral *syntax.Regexp
 }
 
 func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
@@ -237,20 +240,11 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 	// serialize longer despite having a short literal; they reach the shape check
 	// below and are rejected by its literal-length test.
 	if !s.FileName && len(compiledPattern) > len("(?i:abcdefghijkl)(?-s:.)*") {
-		litPref, isFold := extractFoldLiteralLinePrefix(s.Regexp)
+		literal, isFold := extractFoldLiteralLinePrefix(s.Regexp)
 		// CaseSensitive may be overridden by a scoped regexp flag. Only use
 		// the byte matcher when the literal node itself is case-folded.
-		if isFold && len(litPref) > 12 {
-			isEligible := true
-			for i := 0; i < len(litPref); i++ {
-				if litPref[i] >= 128 {
-					isEligible = false
-					break
-				}
-			}
-			if isEligible {
-				t.needle = newAsciiFoldNeedle(litPref)
-			}
+		if isFold && len(literal.Rune) > 12 && isASCIILiteral(literal.Rune) {
+			t.foldedLiteral = literal
 		}
 	}
 
@@ -848,17 +842,23 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 	data := cp.data(t.fileName)
 
 	found := t.found[:0]
-	if t.needle != nil {
-		if t.needle.hasUnicodeFold(data) {
+	if t.foldedLiteral != nil {
+		needle := asciiFoldNeedleFromRunes(t.foldedLiteral.Rune)
+		if needle.needsUnicodeFallback() && !cp.contentIsASCII() {
 			goto fallback
 		}
 
 		// Bound scalar verification to one sixteenth of the document before the
 		// regular expression engine handles near-match-heavy input.
 		comparisonBudget := len(data) / 16
-		cursor := asciiFoldCursor{nextLower: -1, nextUpper: -1}
+		cursor := asciiFoldCursor{
+			nextLower:       -1,
+			nextUpper:       -1,
+			nextSecondLower: -1,
+			nextSecondUpper: -1,
+		}
 		for offset := 0; ; {
-			matchOffset, exhausted := t.needle.find(data, offset, &comparisonBudget, &cursor)
+			matchOffset, exhausted := needle.find(data, offset, &comparisonBudget, &cursor)
 			if exhausted {
 				goto fallback
 			}
@@ -866,7 +866,7 @@ func (t *regexpMatchTree) matches(cp *contentProvider, cost int, known map[match
 				break
 			}
 
-			end := matchOffset + len(t.needle.targets)
+			end := matchOffset + needle.len()
 			if lineEnd := bytes.IndexByte(data[end:], '\n'); lineEnd >= 0 {
 				end += lineEnd
 			} else {
@@ -1548,77 +1548,128 @@ func queryMetaChecksum(field string, value *regexp.Regexp) string {
 }
 
 type asciiFoldNeedle struct {
-	masks   []byte
-	targets []byte
+	runes []rune
 
 	hasKelvinFold bool
 	hasLongSFold  bool
 }
 
-var (
-	kelvinSign = []byte("K")
-	longS      = []byte("ſ")
-)
-
-func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
-	masks := make([]byte, len(needle))
-	targets := make([]byte, len(needle))
-	var hasKelvinFold, hasLongSFold bool
-	for i := 0; i < len(needle); i++ {
-		c := needle[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		if c >= 'a' && c <= 'z' {
-			masks[i] = 0x20
-			targets[i] = c
-		} else {
-			masks[i] = 0x00
-			targets[i] = c
-		}
-
-		switch c {
-		case 'k':
-			hasKelvinFold = true
-		case 's':
-			hasLongSFold = true
+func isASCIILiteral(runes []rune) bool {
+	for _, r := range runes {
+		if r >= utf8.RuneSelf {
+			return false
 		}
 	}
-	return &asciiFoldNeedle{
-		masks:         masks,
-		targets:       targets,
-		hasKelvinFold: hasKelvinFold,
-		hasLongSFold:  hasLongSFold,
-	}
+	return true
 }
 
-// hasUnicodeFold detects non-ASCII spellings that the byte matcher cannot
-// recognize, so callers can use the regular expression engine instead.
-func (an *asciiFoldNeedle) hasUnicodeFold(haystack []byte) bool {
-	return (an.hasKelvinFold && bytes.Contains(haystack, kelvinSign)) ||
-		(an.hasLongSFold && bytes.Contains(haystack, longS))
+func asciiFoldNeedleFromRunes(runes []rune) asciiFoldNeedle {
+	needle := asciiFoldNeedle{runes: runes}
+	for _, r := range runes {
+		switch asciiFoldByte(byte(r)) {
+		case 'k':
+			needle.hasKelvinFold = true
+		case 's':
+			needle.hasLongSFold = true
+		}
+	}
+	return needle
+}
+
+func newAsciiFoldNeedle(needle string) *asciiFoldNeedle {
+	runes := []rune(needle)
+	result := asciiFoldNeedleFromRunes(runes)
+	return &result
+}
+
+func asciiFoldByte(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
+func (an *asciiFoldNeedle) len() int {
+	return len(an.runes)
+}
+
+// needsUnicodeFallback reports whether a byte matcher for this literal could
+// miss a non-ASCII simple-fold spelling.
+func (an *asciiFoldNeedle) needsUnicodeFallback() bool {
+	return an.hasKelvinFold || an.hasLongSFold
 }
 
 func (an *asciiFoldNeedle) matchesAt(haystack []byte, offset int) (bool, int) {
-	for j := 1; j < len(an.targets); j++ {
-		if (haystack[offset+j] | an.masks[j]) != an.targets[j] {
+	for j := 1; j < an.len(); j++ {
+		target := asciiFoldByte(byte(an.runes[j]))
+		if target >= 'a' && target <= 'z' {
+			if haystack[offset+j]|0x20 != target {
+				return false, j
+			}
+		} else if haystack[offset+j] != target {
 			return false, j
 		}
 	}
-	return true, len(an.targets) - 1
+	return true, an.len() - 1
 }
 
 type asciiFoldCursor struct {
-	nextLower int
-	nextUpper int
+	nextLower       int
+	nextUpper       int
+	nextSecondLower int
+	nextSecondUpper int
+	useSecond       bool
+	firstByteMisses int
 }
 
 // find returns the next ASCII-folded literal match. The comparison budget
-// bounds scalar verification work; once it is spent, the caller falls back to
-// the regular expression engine. cursor carries first-byte positions across
-// returned matches so a missing case variant is scanned only once.
+// bounds scalar verification work; after repeated first-byte-only misses, it
+// switches to an equally exact second-byte anchor to avoid per-byte candidate
+// calls. cursor carries anchor positions across returned matches so a missing
+// case variant is scanned only once.
+const firstByteMissLimit = 64
+
+func nextFoldByte(haystack []byte, start, limit int, target byte, nextLower, nextUpper *int) int {
+	if start > limit {
+		return limit + 1
+	}
+	if target >= 'a' && target <= 'z' {
+		if *nextLower < start {
+			idx := bytes.IndexByte(haystack[start:limit+1], target)
+			if idx < 0 {
+				*nextLower = limit + 1
+			} else {
+				*nextLower = start + idx
+			}
+		}
+		upper := target - ('a' - 'A')
+		if *nextUpper < start {
+			idx := bytes.IndexByte(haystack[start:limit+1], upper)
+			if idx < 0 {
+				*nextUpper = limit + 1
+			} else {
+				*nextUpper = start + idx
+			}
+		}
+		if *nextUpper < *nextLower {
+			return *nextUpper
+		}
+		return *nextLower
+	}
+
+	if *nextLower < start {
+		idx := bytes.IndexByte(haystack[start:limit+1], target)
+		if idx < 0 {
+			*nextLower = limit + 1
+		} else {
+			*nextLower = start + idx
+		}
+	}
+	return *nextLower
+}
+
 func (an *asciiFoldNeedle) find(haystack []byte, start int, budget *int, cursor *asciiFoldCursor) (offset int, exhausted bool) {
-	n := len(an.targets)
+	n := an.len()
 	if n == 0 || len(haystack) < n {
 		return -1, false
 	}
@@ -1627,57 +1678,17 @@ func (an *asciiFoldNeedle) find(haystack []byte, start int, budget *int, cursor 
 	if start > limit {
 		return -1, false
 	}
-
-	t0 := an.targets[0]
-	i := start
-	if an.masks[0] == 0x20 {
-		t0Upper := t0 - ('a' - 'A')
-		for i <= limit {
-			if cursor.nextLower < i {
-				idx := bytes.IndexByte(haystack[i:limit+1], t0)
-				if idx < 0 {
-					cursor.nextLower = limit + 1
-				} else {
-					cursor.nextLower = i + idx
-				}
-			}
-			if cursor.nextUpper < i {
-				idx := bytes.IndexByte(haystack[i:limit+1], t0Upper)
-				if idx < 0 {
-					cursor.nextUpper = limit + 1
-				} else {
-					cursor.nextUpper = i + idx
-				}
-			}
-
-			next := cursor.nextLower
-			if cursor.nextUpper < next {
-				next = cursor.nextUpper
-			}
-			if next > limit {
-				return -1, false
-			}
-
-			i = next
-			matched, compared := an.matchesAt(haystack, i)
-			*budget -= compared
-			if *budget < 0 {
-				return -1, true
-			}
-			if matched {
-				return i, false
-			}
-			i++
-		}
-		return -1, false
+	if cursor.useSecond {
+		return an.findFromSecond(haystack, start, limit, budget, cursor)
 	}
 
-	for i <= limit {
-		idx := bytes.IndexByte(haystack[i:limit+1], t0)
-		if idx < 0 {
+	t0 := asciiFoldByte(byte(an.runes[0]))
+	for i := start; i <= limit; {
+		i = nextFoldByte(haystack, i, limit, t0, &cursor.nextLower, &cursor.nextUpper)
+		if i > limit {
 			return -1, false
 		}
-		i += idx
+
 		matched, compared := an.matchesAt(haystack, i)
 		*budget -= compared
 		if *budget < 0 {
@@ -1686,27 +1697,57 @@ func (an *asciiFoldNeedle) find(haystack []byte, start int, budget *int, cursor 
 		if matched {
 			return i, false
 		}
+		if compared == 1 {
+			cursor.firstByteMisses++
+			if cursor.firstByteMisses >= firstByteMissLimit && n > 1 {
+				cursor.useSecond = true
+				return an.findFromSecond(haystack, i+1, limit, budget, cursor)
+			}
+		}
 		i++
 	}
 	return -1, false
 }
 
-func extractFoldLiteralLinePrefix(re *syntax.Regexp) (prefix string, isFold bool) {
+func (an *asciiFoldNeedle) findFromSecond(haystack []byte, start, limit int, budget *int, cursor *asciiFoldCursor) (offset int, exhausted bool) {
+	t1 := asciiFoldByte(byte(an.runes[1]))
+	secondLimit := limit + 1
+	for start <= limit {
+		second := nextFoldByte(haystack, start+1, secondLimit, t1, &cursor.nextSecondLower, &cursor.nextSecondUpper)
+		if second > secondLimit {
+			return -1, false
+		}
+
+		i := second - 1
+		matched, compared := an.matchesAt(haystack, i)
+		*budget -= compared
+		if *budget < 0 {
+			return -1, true
+		}
+		if matched {
+			return i, false
+		}
+		start = i + 1
+	}
+	return -1, false
+}
+
+func extractFoldLiteralLinePrefix(re *syntax.Regexp) (literal *syntax.Regexp, isFold bool) {
 	for re != nil && re.Op == syntax.OpCapture && len(re.Sub) == 1 {
 		re = re.Sub[0]
 	}
 	if re == nil || re.Op != syntax.OpConcat || len(re.Sub) != 2 || !isRegexpLineSuffix(re.Sub[1]) {
-		return "", false
+		return nil, false
 	}
 
-	literal := re.Sub[0]
+	literal = re.Sub[0]
 	for literal.Op == syntax.OpCapture && len(literal.Sub) == 1 {
 		literal = literal.Sub[0]
 	}
 	if literal.Op != syntax.OpLiteral {
-		return "", false
+		return nil, false
 	}
-	return string(literal.Rune), literal.Flags&syntax.FoldCase != 0
+	return literal, literal.Flags&syntax.FoldCase != 0
 }
 
 func isRegexpLineSuffix(re *syntax.Regexp) bool {

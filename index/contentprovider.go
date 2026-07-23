@@ -78,6 +78,21 @@ func (p *contentProvider) newlines() newlines {
 	return newlines{locs: p._nl, fileSize: p.fileSize}
 }
 
+// contentIsASCII reports whether the selected file's content contains only
+// single-byte runes. It uses the shard's cumulative byte and rune boundaries,
+// avoiding a second scan of content that is already needed for matching.
+func (p *contentProvider) contentIsASCII() bool {
+	if p.id.metaData.PlainASCII {
+		return true
+	}
+
+	startRunes := uint32(0)
+	if p.idx > 0 {
+		startRunes = p.id.fileEndRunes[p.idx-1]
+	}
+	return p.fileSize == p.id.fileEndRunes[p.idx]-startRunes
+}
+
 func (p *contentProvider) data(fileName bool) []byte {
 	if fileName {
 		return p.id.fileNameContent[p.id.fileNameIndex[p.idx]:p.id.fileNameIndex[p.idx+1]]
