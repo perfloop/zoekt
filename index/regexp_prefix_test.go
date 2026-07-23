@@ -108,14 +108,6 @@ func TestRegexpPrefixMatchesHybridRegexp(t *testing.T) {
 func regexpMatchTreeRanges(t *testing.T, pattern string, content []byte, usePrefix bool) [][2]uint32 {
 	t.Helper()
 
-	searcher := searcherForTest(t, testShardBuilder(t, nil, Document{
-		Name:    "regexp-prefix.txt",
-		Content: content,
-	}))
-	id, ok := searcher.(*indexData)
-	if !ok {
-		t.Fatalf("searcher type = %T, want *indexData", searcher)
-	}
 	q, err := query.Parse(pattern)
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +115,20 @@ func regexpMatchTreeRanges(t *testing.T, pattern string, content []byte, usePref
 	re, ok := q.(*query.Regexp)
 	if !ok {
 		t.Fatalf("query type = %T, want *query.Regexp", q)
+	}
+	return regexpMatchTreeRangesForRegexp(t, re, content, usePrefix)
+}
+
+func regexpMatchTreeRangesForRegexp(t *testing.T, re *query.Regexp, content []byte, usePrefix bool) [][2]uint32 {
+	t.Helper()
+
+	searcher := searcherForTest(t, testShardBuilder(t, nil, Document{
+		Name:    "regexp-prefix.txt",
+		Content: content,
+	}))
+	id, ok := searcher.(*indexData)
+	if !ok {
+		t.Fatalf("searcher type = %T, want *indexData", searcher)
 	}
 
 	mt := newRegexpMatchTree(re)
@@ -160,6 +166,25 @@ func TestRegexpPrefixDirectMatchRanges(t *testing.T) {
 	got := regexpMatchTreeRanges(t, pattern, content, true)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("direct match ranges differ (-want +got):\n%s", diff)
+	}
+}
+
+func TestRegexpPrefixDirectBareLiteralRanges(t *testing.T) {
+	const pattern = "(?i)ABAB"
+	content := []byte(strings.Repeat("x", 1024) + "aBaBaBaB")
+	syntaxRe, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := &query.Regexp{Regexp: syntaxRe}
+	if !newRegexpMatchTree(re).hasPrefix {
+		t.Fatal("expected direct bare-literal regexp path")
+	}
+
+	want := regexpMatchTreeRangesForRegexp(t, re, content, false)
+	got := regexpMatchTreeRangesForRegexp(t, re, content, true)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("bare literal match ranges differ (-want +got):\n%s", diff)
 	}
 }
 
@@ -225,6 +250,7 @@ func TestRegexpPrefixEligibility(t *testing.T) {
 		want          bool
 	}{
 		{pattern: "(?i)MyGreatMethod.*", want: true},
+		{pattern: "(?i)for.*", want: false},
 		{pattern: "(?i)smart.*", want: true},
 		{pattern: "(?i)kebab.*", want: true},
 		{pattern: "(?i)image.*", want: true},

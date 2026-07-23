@@ -237,7 +237,7 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 		litPref, isFold, matchToLineEnd := extractFoldLiteralMatch(s.Regexp)
 		// CaseSensitive may be overridden by a scoped regexp flag. Only use
 		// the byte matcher when the literal node itself is case-folded.
-		if isFold && len(litPref) >= 3 {
+		if isFold && len(litPref) > 3 {
 			isEligible := true
 			for i := 0; i < len(litPref); i++ {
 				if litPref[i] >= 128 {
