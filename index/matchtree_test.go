@@ -573,6 +573,12 @@ func TestRegexpPrefixMatchesHybridRegexp(t *testing.T) {
 			content: strings.Repeat("A", 127) + "B\n" +
 				strings.Repeat(strings.Repeat("A", 126)+"BC", 4) + strings.Repeat("x", 2048),
 		},
+		{
+			name:    "long literal budget fallback",
+			pattern: "(?i)QwertyUiopAbcd.*",
+			content: strings.Repeat("QwertyUiopAbcX\n", 6000) +
+				"QwertyUiopAbcd final\n",
+		},
 	}
 
 	for _, tc := range cases {
@@ -659,43 +665,55 @@ func TestRegexpPrefixMatchesFullEngineForUnicodeFolds(t *testing.T) {
 	}{
 		{
 			name:    "Kelvin sign",
-			pattern: "(?i)kebab.*",
-			content: "Kebab scale\n",
+			pattern: "(?i)KelvinPrefixX.*",
+			content: "KelvinPrefixX scale\n",
 		},
 		{
 			name:    "long s",
-			pattern: "(?i)smart.*",
-			content: "ſmart search\n",
+			pattern: "(?i)smartprefixxx.*",
+			content: "ſmartprefixxx search\n",
 		},
 		{
 			name:    "dotted I",
-			pattern: "(?i)image.*",
-			content: "İmage search\n",
+			pattern: "(?i)imageprefixxx.*",
+			content: "İmageprefixxx search\n",
 		},
 		{
 			name:    "dotless I",
-			pattern: "(?i)impact.*",
-			content: "ımpact search\n",
+			pattern: "(?i)impactprefixx.*",
+			content: "ımpactprefixx search\n",
 		},
 		{
 			name:    "interior Kelvin sign",
-			pattern: "(?i)bake.*",
-			content: "baKe search\n",
+			pattern: "(?i)bakelongprefix.*",
+			content: "baKelongprefix search\n",
 		},
 		{
 			name:    "interior long s",
-			pattern: "(?i)mask.*",
-			content: "maſk search\n",
+			pattern: "(?i)masklongprefix.*",
+			content: "maſklongprefix search\n",
 		},
 		{
 			name:    "interior dotted I",
-			pattern: "(?i)mile.*",
-			content: "mİle search\n",
+			pattern: "(?i)milelongprefix.*",
+			content: "mİlelongprefix search\n",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			q, err := query.Parse(tc.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			re, ok := q.(*query.Regexp)
+			if !ok {
+				t.Fatalf("query type = %T, want *query.Regexp", q)
+			}
+			if newRegexpMatchTree(re).needle == nil {
+				t.Fatal("expected direct regexp prefix path")
+			}
+
 			content := []byte(tc.content)
 			want := regexpMatchTreeRanges(t, tc.pattern, content, false)
 			got := regexpMatchTreeRanges(t, tc.pattern, content, true)
@@ -713,11 +731,14 @@ func TestRegexpPrefixEligibility(t *testing.T) {
 		want          bool
 	}{
 		{pattern: "(?i)MyGreatMethod.*", want: true},
+		{pattern: "(?i)abcdefghijkl.*", want: false},
+		{pattern: "(?i)" + strings.Repeat(`\.`, 12) + ".*", want: false},
+		{pattern: "(?i)abcdefghijklm.*", want: true},
 		{pattern: "(?i)ABCD.*", want: false},
 		{pattern: "(?i)for.*", want: false},
-		{pattern: "(?i)smart.*", want: true},
-		{pattern: "(?i)kebab.*", want: true},
-		{pattern: "(?i)image.*", want: true},
+		{pattern: "(?i)smart.*", want: false},
+		{pattern: "(?i)kebab.*", want: false},
+		{pattern: "(?i)image.*", want: false},
 		{pattern: "(?i)MyAwesomeFunction[0-9]+", want: false},
 		{pattern: "(?i)MyAwesomeFunction.*?", want: false},
 		{pattern: "(?i)éclair.*", want: false},

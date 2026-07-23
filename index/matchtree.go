@@ -231,13 +231,15 @@ func newRegexpMatchTree(s *query.Regexp) *regexpMatchTree {
 		fileName:     s.FileName,
 	}
 
-	// Short patterns cannot contain the five-byte literal required by the
-	// direct path. Avoid inspecting their syntax tree on the ordinary path.
-	if !s.FileName && len(compiledPattern) > len("(?i:abcd)(?-s:.)*") {
+	// Compact patterns cannot encode the thirteen-byte literal required by the
+	// direct path, so they skip the prefix-shape extraction. Escaped literals can
+	// serialize longer despite having a short literal; they reach the shape check
+	// below and are rejected by its literal-length test.
+	if !s.FileName && len(compiledPattern) > len("(?i:abcdefghijkl)(?-s:.)*") {
 		litPref, isFold := extractFoldLiteralLinePrefix(s.Regexp)
 		// CaseSensitive may be overridden by a scoped regexp flag. Only use
 		// the byte matcher when the literal node itself is case-folded.
-		if isFold && len(litPref) > 4 {
+		if isFold && len(litPref) > 12 {
 			isEligible := true
 			for i := 0; i < len(litPref); i++ {
 				if litPref[i] >= 128 {
